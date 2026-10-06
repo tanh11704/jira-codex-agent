@@ -40,6 +40,14 @@ class Database:
             db.executescript(
                 """
                 PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_key TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    message TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS task_events_issue ON task_events(issue_key,id);
                 CREATE TABLE IF NOT EXISTS tasks (
                     issue_key TEXT PRIMARY KEY,
                     summary TEXT NOT NULL,
@@ -80,6 +88,16 @@ class Database:
                 if len(candidates) == 1:
                     db.execute('UPDATE tasks SET session_id=? WHERE issue_key=?', (candidates.pop(), row['issue_key']))
             db.execute("UPDATE tasks SET state='interrupted', error='Daemon stopped before completion', updated_at=? WHERE state='coding'", (datetime.now(timezone.utc).isoformat(),))
+
+    def append_event(self, issue_key: str, kind: str, message: str) -> None:
+        with self.connect() as db:
+            db.execute('INSERT INTO task_events(issue_key,timestamp,kind,message) VALUES (?,?,?,?)',
+                       (issue_key, datetime.now(timezone.utc).isoformat(), kind, message[:32000]))
+            db.execute('DELETE FROM task_events WHERE issue_key=? AND id NOT IN (SELECT id FROM task_events WHERE issue_key=? ORDER BY id DESC LIMIT 2000)', (issue_key, issue_key))
+
+    def events(self, issue_key: str, after: int = 0) -> list[dict]:
+        with self.connect() as db:
+            return [dict(row) for row in db.execute('SELECT * FROM task_events WHERE issue_key=? AND id>? ORDER BY id LIMIT 200', (issue_key, after))]
 
     def request_resume(self, issue_key: str) -> None:
         with self.connect() as db:

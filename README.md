@@ -7,13 +7,13 @@ The agent deliberately does **not** push branches, open pull requests, transitio
 ## MVP flow
 
 ```text
-Jira queue → Git worktree → codex exec → local review queue → quota check
+Jira queue → Git worktree → Codex app-server → local review queue → quota check
      ↑                                                    │
      └──── sleep 10 min when idle / until reset if low ───┘
 ```
 
 - Jira Cloud REST API v3 using API-token basic authentication
-- `codex exec --json` in a workspace-write sandbox
+- Codex app-server with a workspace-write sandbox and human approval requests
 - short-lived `codex app-server` process for the five-hour quota snapshot
 - SQLite state with WAL mode
 - Unix-domain socket for local CLI control
@@ -76,6 +76,23 @@ Use **Accounts & Settings** in the app to configure Jira URL, email, API token, 
 The app expects the default socket at `~/.local/share/jira-codex-agent/agent.sock`. If `JCA_SOCKET_PATH` is customized, enter the same path under Advanced. Restart the daemon after saving configuration. The **Start daemon** button uses the `com.jira-codex-agent` launchd service, so install the launch agent first if you want that button to work.
 
 The UI requires macOS 13 or newer. Its source is a standalone Swift package under `macos/JiraCodexAgentUI`, so it can also be opened directly in Xcode.
+
+### Codex approvals
+
+The dashboard polls pending approvals every two seconds and shows the task, command,
+working directory, reason, and full request details. Choose **Approve** or **Decline**;
+requests are never automatically accepted. Command/file approvals apply to one request;
+explicit permission grants apply only to the current turn, never the whole session.
+Existing Codex execution-policy rules still apply to ordinary sandboxed commands.
+Human wait time does not count against the task execution timeout, and the scheduler
+does not start another task while waiting. Closing the dashboard leaves the request
+pending; stopping the daemon cancels pending approvals and preserves the worktree and
+thread for resume. Restarted threads may ask for approval again. Unknown interactive
+request types fail explicitly without silently granting access.
+
+After upgrading, reopen the rebuilt application and restart the daemon. There is no
+fallback to the noninteractive runner if app-server fails. This integration follows
+the [official app-server protocol](https://learn.chatgpt.com/docs/app-server).
 
 ## Safety and behavior
 

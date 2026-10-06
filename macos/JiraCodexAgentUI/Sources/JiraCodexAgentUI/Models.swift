@@ -1,5 +1,21 @@
 import Foundation
 
+struct CodexApproval: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let threadId: String?
+    let command: String?
+    let cwd: String
+    let reason: String?
+    let details: String
+    let changes: String
+    let scope: String
+}
+
+struct ApprovalsResponse: Decodable {
+    let approvals: [CodexApproval]
+}
+
 struct AgentTask: Codable, Identifiable, Hashable {
     let issueKey: String
     let summary: String
@@ -72,6 +88,17 @@ struct PauseResponse: Decodable {
 
 struct FetchJiraResponse: Decodable {
     let count: Int
+}
+
+struct TaskLogEvent: Decodable, Identifiable {
+    let id: Int
+    let timestamp: String
+    let kind: String
+    let message: String
+}
+
+struct TaskLogsResponse: Decodable {
+    let events: [TaskLogEvent]
 }
 
 struct ErrorResponse: Decodable {

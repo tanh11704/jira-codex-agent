@@ -18,6 +18,49 @@ final class AgentStore: ObservableObject {
     @AppStorage("daemonPythonPath") var daemonPythonPath = ""
     private var daemonProcess: Process?
     @Published var taskActionError: String?
+    @Published private(set) var logEvents: [TaskLogEvent] = []
+    @Published private(set) var logError: String?
+    private var logTaskID: String?
+    private var loadingLogs = false
+    @Published private(set) var approvals: [CodexApproval] = []
+    @Published private(set) var answeringApprovals: Set<String> = []
+
+    func refreshApprovals() async {
+        do {
+            let response = try await client.request("approvals", socketPath: expandedSocketPath, as: ApprovalsResponse.self)
+            approvals = response.approvals
+        } catch {
+            approvals = []
+        }
+    }
+
+    func answerApproval(_ approval: CodexApproval, accept: Bool) async {
+        guard !answeringApprovals.contains(approval.id) else { return }
+        answeringApprovals.insert(approval.id)
+        defer { answeringApprovals.remove(approval.id) }
+        do {
+            _ = try await client.request("approval:\(approval.id):\(accept ? "accept" : "decline")", socketPath: expandedSocketPath, as: PauseResponse.self)
+            await refreshApprovals()
+        } catch { taskActionError = error.localizedDescription }
+    }
+
+    func refreshLogs() async {
+        guard !loadingLogs else { return }
+        guard let key = selectedTaskID ?? currentTask?.issueKey else {
+            logEvents = []; logTaskID = nil
+            return
+        }
+        loadingLogs = true
+        defer { loadingLogs = false }
+        if logTaskID != key { logEvents = []; logTaskID = key }
+        do {
+            let response = try await client.request("logs:\(key):\(logEvents.last?.id ?? 0)", socketPath: expandedSocketPath, as: TaskLogsResponse.self)
+            guard key == (selectedTaskID ?? currentTask?.issueKey) else { return }
+            logEvents.append(contentsOf: response.events)
+            if logEvents.count > 2000 { logEvents.removeFirst(logEvents.count - 2000) }
+            logError = nil
+        } catch { logError = error.localizedDescription }
+    }
     @Published private(set) var isFetchingJira = false
     @Published private(set) var fetchJiraMessage: String?
 
@@ -103,7 +146,7 @@ final class AgentStore: ObservableObject {
     var currentTask: AgentTask? { tasks.first(where: { $0.state == "coding" }) }
     var reviewCount: Int { tasks.filter { $0.state == "review" }.count }
     var failedCount: Int { tasks.filter { $0.state == "failed" }.count }
-    var queuedCount: Int { tasks.filter { $0.state == "queued" }.count }
+    var queuedCount: Int { tasks.filter { $0.state == "queued" || $0.state == "resume_pending" }.count }
 
     var filteredTasks: [AgentTask] {
         tasks.filter { selectedFilter.matches($0) }

@@ -73,7 +73,8 @@ class Orchestrator:
         self.wake_event.set()
 
     async def run_cycle(self) -> bool:
-        pending = self.database.list_tasks(TaskState.RESUME_PENDING)
+        pending = self.database.list_tasks(TaskState.RESUME_PENDING) + self.database.list_tasks(TaskState.INTERRUPTED)
+        pending.sort(key=lambda task: task['created_at'])
         if pending:
             if self.settings.dry_run or not await self._respect_quota():
                 return False
@@ -93,6 +94,10 @@ class Orchestrator:
             return False
         if self.database.is_paused() or self.stop_event.is_set():
             return False
+        # A recovery request may arrive while fetching Jira or waiting on quota.
+        # Re-select recovery work on the next cycle instead of starting a new issue.
+        if self.database.list_tasks(TaskState.RESUME_PENDING) or self.database.list_tasks(TaskState.INTERRUPTED):
+            return True
         queued_keys = {row["issue_key"] for row in queued}
         issue = next((item for item in issues if item.key in queued_keys), None)
         if issue is None:
@@ -110,11 +115,21 @@ class Orchestrator:
             else:
                 worktree = await self.worktrees.create(issue.key)
             self.database.update_task(issue.key, TaskState.CODING, worktree=str(worktree), error=None)
+            self.database.append_event(issue.key, 'lifecycle', 'Resuming Codex session' if resume else 'Starting Codex task')
             def record(event: dict) -> None:
                 fields = {'progress': json.dumps(event, ensure_ascii=False)[-16000:]}
                 if event.get('thread_id'):
                     fields['session_id'] = event['thread_id']
                 self.database.update_task(issue.key, TaskState.CODING, **fields)
+                item = event.get('item', {})
+                message = item.get('text') or event.get('message') or ''
+                if item.get('command'):
+                    message = str(item['command']) + '\n' + str(item.get('aggregated_output', ''))
+                    if item.get('exit_code') is not None:
+                        message += f"\nExit code: {item['exit_code']}"
+                if not message:
+                    message = json.dumps(event, ensure_ascii=False)
+                self.database.append_event(issue.key, event.get('type', 'event'), str(message))
 
             prompt = self._prompt(issue)
             if resume:
@@ -127,12 +142,14 @@ class Orchestrator:
                     run.cancel()
                     await asyncio.gather(run, return_exceptions=True)
                     self.database.update_task(issue.key, TaskState.INTERRUPTED, error='Daemon stopped; resume to continue')
+                    self.database.append_event(issue.key, 'lifecycle', 'Interrupted: daemon stopped')
                     return
                 result = await run
             finally:
                 stopped.cancel()
                 await asyncio.gather(stopped, return_exceptions=True)
             state = TaskState.REVIEW if result.outcome == RunOutcome.SUCCEEDED else (TaskState.INTERRUPTED if result.outcome == RunOutcome.TIMED_OUT else TaskState.FAILED)
+            self.database.append_event(issue.key, 'lifecycle', f'Task {state.value}: {result.error or result.final_message}')
             self.database.update_task(
                 issue.key,
                 state,
@@ -144,6 +161,7 @@ class Orchestrator:
                 await self._respect_quota()
         except Exception as exc:
             self.database.update_task(issue.key, TaskState.FAILED, error=str(exc))
+            self.database.append_event(issue.key, 'error', str(exc))
             raise
 
     async def _respect_quota(self) -> bool:

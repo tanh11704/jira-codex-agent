@@ -8,9 +8,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import CodexRunResult, RunOutcome
+from .app_server import CodexRunner
 
 
-class CodexRunner:
+class ExecRunner:
     def __init__(self, command: str = "codex", model: str | None = None, timeout: int = 7200) -> None:
         self.command = command
         self.model = model
@@ -62,6 +63,8 @@ class CodexRunner:
             while chunk := await process.stderr.read(8192):
                 tail.extend(chunk)
                 del tail[:-65536]
+                if on_event:
+                    on_event({'type': 'stderr', 'message': chunk.decode(errors='replace')})
             return bytes(tail)
 
         stderr_task = asyncio.create_task(consume_stderr())

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject private var store: AgentStore
+    @State private var isShowingLogs = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -13,11 +14,17 @@ struct DashboardView: View {
         }
         .frame(minWidth: 920, minHeight: 600)
         .task { store.startRefreshing() }
+        .task {
+            while !Task.isCancelled {
+                await store.refreshApprovals()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
         .onDisappear { store.stopRefreshing() }
         .sheet(isPresented: $store.isShowingSettings) {
             SettingsView().environmentObject(store)
         }
-        .alert("Task recovery failed", isPresented: Binding(get: { store.taskActionError != nil }, set: { if !$0 { store.taskActionError = nil } })) {
+        .alert("Action failed", isPresented: Binding(get: { store.taskActionError != nil }, set: { if !$0 { store.taskActionError = nil } })) {
             Button("OK") { store.taskActionError = nil }
         } message: { Text(store.taskActionError ?? "") }
     }
@@ -136,6 +143,10 @@ struct DashboardView: View {
                 offlineBanner(message)
             }
             taskList
+            ApprovalView().environmentObject(store)
+            if isShowingLogs {
+                TaskLogView(isShowingLogs: $isShowingLogs).environmentObject(store)
+            }
         }
         .padding(24)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -148,6 +159,11 @@ struct DashboardView: View {
                 Text(subtitle).foregroundStyle(.secondary)
             }
             Spacer()
+            Button {
+                isShowingLogs.toggle()
+            } label: {
+                Label(isShowingLogs ? "Hide logs" : "Show Codex logs", systemImage: "terminal")
+            }
             if let date = store.lastUpdated {
                 Text("Updated \(date, style: .relative) ago")
                     .font(.caption)
@@ -203,6 +219,7 @@ struct DashboardView: View {
     }
 
     private var subtitle: String {
+        if !store.approvals.isEmpty { return "Waiting for approval — task execution is paused" }
         if let current = store.currentTask {
             return "Currently working on \(current.issueKey)"
         }
@@ -237,7 +254,12 @@ private struct TaskRow: View {
                 }
             }
             Spacer()
-            TaskStateBadge(task: task)
+            if store.approvals.contains(where: { $0.threadId == task.sessionId }) {
+                Label("Waiting for approval", systemImage: "hand.raised.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            } else {
+                TaskStateBadge(task: task)
+            }
             if task.state == "review" {
                 Button("Review done") { Task { await store.taskAction("review_done", task: task) } }
             }

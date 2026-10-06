@@ -31,7 +31,9 @@ class ControlServer:
     async def start(self) -> asyncio.AbstractServer:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.unlink(missing_ok=True)
-        return await asyncio.start_unix_server(self._handle, path=self.path)
+        server = await asyncio.start_unix_server(self._handle, path=self.path)
+        self.path.chmod(0o600)
+        return server
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -42,6 +44,18 @@ class ControlServer:
                 response = {"running": True, "paused": self.database.is_paused(), "current": coding[0] if coding else None}
             elif command == "tasks":
                 response = {"tasks": self.database.list_tasks()}
+            elif command == 'approvals':
+                runner = self.orchestrator.runner if self.orchestrator else None
+                response = {'approvals': list(runner.approvals.values()) if runner else []}
+            elif command.startswith('approval:'):
+                if not self.orchestrator:
+                    raise ValueError('Approval handling unavailable')
+                _, token, decision = command.split(':', 2)
+                self.orchestrator.runner.answer_approval(token, decision)
+                response = {'paused': self.database.is_paused()}
+            elif command.startswith('logs:'):
+                _, key, cursor = command.split(':', 2)
+                response = {'events': self.database.events(key, max(0, int(cursor)))}
             elif command == 'fetch_jira':
                 if not self.orchestrator:
                     raise ValueError('Jira synchronization unavailable')
