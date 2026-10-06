@@ -22,6 +22,26 @@ final class AgentStore: ObservableObject {
     @Published private(set) var logError: String?
     private var logTaskID: String?
     private var loadingLogs = false
+    @Published private(set) var quota: QuotaResponse?
+    @Published private(set) var quotaError: String?
+    @Published private(set) var quotaUpdatedAt: Date?
+    @Published private(set) var isLoadingQuota = false
+
+    func refreshQuota() async {
+        guard !isLoadingQuota else { return }
+        isLoadingQuota = true
+        defer { isLoadingQuota = false }
+        do {
+            let response = try await client.request("quota", socketPath: expandedSocketPath, as: QuotaResponse.self)
+            quota = response
+            quotaError = response.snapshot.error
+            quotaUpdatedAt = Date()
+        } catch {
+            quota = nil
+            quotaError = error.localizedDescription
+            quotaUpdatedAt = nil
+        }
+    }
     @Published private(set) var approvals: [CodexApproval] = []
     @Published private(set) var answeringApprovals: Set<String> = []
 

@@ -3,6 +3,7 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var store: AgentStore
     @State private var isShowingLogs = false
+    @State private var isLogsExpanded = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -138,14 +139,19 @@ struct DashboardView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 20) {
             header
-            metrics
+            if !isShowingLogs || !isLogsExpanded {
+                metrics
+                QuotaView().environmentObject(store)
+            }
             if case .offline(let message) = store.connection {
                 offlineBanner(message)
             }
-            taskList
+            if !isShowingLogs || !isLogsExpanded {
+                taskList
+            }
             ApprovalView().environmentObject(store)
             if isShowingLogs {
-                TaskLogView(isShowingLogs: $isShowingLogs).environmentObject(store)
+                TaskLogView(isShowingLogs: $isShowingLogs, isExpanded: $isLogsExpanded).environmentObject(store)
             }
         }
         .padding(24)
@@ -159,15 +165,18 @@ struct DashboardView: View {
                 Text(subtitle).foregroundStyle(.secondary)
             }
             Spacer()
-            Button {
-                isShowingLogs.toggle()
-            } label: {
-                Label(isShowingLogs ? "Hide logs" : "Show Codex logs", systemImage: "terminal")
-            }
-            if let date = store.lastUpdated {
-                Text("Updated \(date, style: .relative) ago")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            VStack(alignment: .trailing, spacing: 8) {
+                Button {
+                    isShowingLogs.toggle()
+                    if !isShowingLogs { isLogsExpanded = false }
+                } label: {
+                    Label(isShowingLogs ? "Hide logs" : "Show Codex logs", systemImage: "terminal")
+                }
+                if let date = store.lastUpdated {
+                    Text("Updated \(date, style: .relative) ago")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }

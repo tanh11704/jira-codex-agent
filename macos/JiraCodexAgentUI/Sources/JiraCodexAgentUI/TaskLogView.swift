@@ -3,6 +3,7 @@ import SwiftUI
 struct TaskLogView: View {
     @EnvironmentObject private var store: AgentStore
     @Binding var isShowingLogs: Bool
+    @Binding var isExpanded: Bool
     @State private var follow = true
 
     var body: some View {
@@ -18,7 +19,12 @@ struct TaskLogView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(store.logEvents.map { "[\($0.timestamp)] \($0.kind)\n\($0.message)" }.joined(separator: "\n\n"), forType: .string)
                 }
-                Button { isShowingLogs = false } label: {
+                Button { isExpanded.toggle() } label: {
+                    Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .help(isExpanded ? "Collapse Codex logs" : "Expand Codex logs")
+                .accessibilityLabel(isExpanded ? "Collapse Codex logs" : "Expand Codex logs")
+                Button { isShowingLogs = false; isExpanded = false } label: {
                     Image(systemName: "xmark")
                 }.help("Hide Codex logs")
             }.padding(12)
@@ -45,7 +51,7 @@ struct TaskLogView: View {
                 }
             }
         }
-        .frame(height: 250)
+        .frame(minHeight: 250, maxHeight: isExpanded ? .infinity : 250)
         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.4)))
         .task {

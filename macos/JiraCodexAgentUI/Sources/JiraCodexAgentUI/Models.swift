@@ -1,5 +1,37 @@
 import Foundation
 
+struct QuotaWindowInfo: Decodable {
+    let used_percent: Int
+    let window_minutes: Int?
+    let resets_at: String?
+    var remaining: Int { 100 - used_percent }
+    var resetDate: Date? {
+        guard let resets_at else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: resets_at) ?? ISO8601DateFormatter().date(from: resets_at)
+    }
+}
+
+struct QuotaInfo: Decodable {
+    let primary: QuotaWindowInfo?
+    let secondary: QuotaWindowInfo?
+    let ordinary_usage_allowed: Bool?
+    let error: String?
+    var fiveHour: QuotaWindowInfo? {
+        [primary, secondary].compactMap { $0 }.first { $0.window_minutes == 300 }
+    }
+    var weekly: QuotaWindowInfo? {
+        [primary, secondary].compactMap { $0 }.first { $0.window_minutes == 10080 }
+    }
+}
+
+struct QuotaResponse: Decodable {
+    let snapshot: QuotaInfo
+    let fiveHourThreshold: Int
+    let weeklyThreshold: Int
+}
+
 struct CodexApproval: Decodable, Identifiable {
     let id: String
     let kind: String

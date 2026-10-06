@@ -44,6 +44,13 @@ class ControlServer:
                 response = {"running": True, "paused": self.database.is_paused(), "current": coding[0] if coding else None}
             elif command == "tasks":
                 response = {"tasks": self.database.list_tasks()}
+            elif command == 'quota':
+                if not self.orchestrator:
+                    raise ValueError('Quota reader unavailable')
+                snapshot = await self.orchestrator.quota.read()
+                response = {'snapshot': snapshot.model_dump(mode='json'),
+                            'fiveHourThreshold': self.orchestrator.settings.quota_remaining_threshold,
+                            'weeklyThreshold': self.orchestrator.settings.quota_weekly_remaining_threshold}
             elif command == 'approvals':
                 runner = self.orchestrator.runner if self.orchestrator else None
                 response = {'approvals': list(runner.approvals.values()) if runner else []}
