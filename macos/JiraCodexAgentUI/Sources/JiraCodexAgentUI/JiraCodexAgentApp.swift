@@ -1,7 +1,14 @@
 import SwiftUI
 
+final class ApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+    }
+}
+
 @main
 struct JiraCodexAgentApp: App {
+    @NSApplicationDelegateAdaptor(ApplicationDelegate.self) private var applicationDelegate
     @StateObject private var store = AgentStore()
 
     var body: some Scene {

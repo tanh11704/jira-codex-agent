@@ -14,6 +14,10 @@ class TaskState(StrEnum):
     CODING = "coding"
     REVIEW = "review"
     FAILED = "failed"
+    EXCLUDED = "excluded"
+    INTERRUPTED = "interrupted"
+    RESUME_PENDING = "resume_pending"
+    DONE = "done"
 
 
 class Database:
@@ -54,6 +58,34 @@ class Database:
                 """
             )
             db.execute("INSERT OR IGNORE INTO agent_state VALUES ('paused', 'false')")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(tasks)')}
+            if 'progress' not in columns:
+                db.execute('ALTER TABLE tasks ADD COLUMN progress TEXT')
+
+    def recover_interrupted(self) -> None:
+        # Older daemon versions only persisted the session on completion.
+        # Recover only an unambiguous session with this exact worktree.
+        sessions_root = Path('~/.codex/sessions').expanduser()
+        with self.connect() as db:
+            for row in db.execute("SELECT issue_key,worktree FROM tasks WHERE state='coding' AND session_id IS NULL AND worktree IS NOT NULL").fetchall():
+                candidates = set()
+                for path in sessions_root.glob('**/*.jsonl'):
+                    try:
+                        with path.open() as stream:
+                            metadata = json.loads(stream.readline()).get('payload', {})
+                        if metadata.get('cwd') == row['worktree'] and metadata.get('id'):
+                            candidates.add(metadata['id'])
+                    except (OSError, ValueError):
+                        continue
+                if len(candidates) == 1:
+                    db.execute('UPDATE tasks SET session_id=? WHERE issue_key=?', (candidates.pop(), row['issue_key']))
+            db.execute("UPDATE tasks SET state='interrupted', error='Daemon stopped before completion', updated_at=? WHERE state='coding'", (datetime.now(timezone.utc).isoformat(),))
+
+    def request_resume(self, issue_key: str) -> None:
+        with self.connect() as db:
+            cursor = db.execute("UPDATE tasks SET state='resume_pending' WHERE issue_key=? AND state IN ('interrupted','failed')", (issue_key,))
+            if cursor.rowcount != 1:
+                raise ValueError('Task must be interrupted or failed to resume')
 
     def upsert_task(self, issue_key: str, summary: str, state: TaskState = TaskState.QUEUED) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -66,7 +98,7 @@ class Database:
             )
 
     def update_task(self, issue_key: str, state: TaskState, **fields: object) -> None:
-        allowed = {"worktree", "session_id", "result", "error"}
+        allowed = {"worktree", "session_id", "result", "error", "progress"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"Unsupported fields: {sorted(invalid)}")
@@ -85,9 +117,28 @@ class Database:
         if state:
             query += " WHERE state = ?"
             params = (state.value,)
+        else:
+            query += " WHERE state != 'excluded'"
         query += " ORDER BY created_at"
         with self.connect() as db:
             return [dict(row) for row in db.execute(query, params).fetchall()]
+
+    def reconcile_queue(self, issues: list[tuple[str, str]]) -> None:
+        """Archive queued issues outside a complete JQL snapshot; preserve work history."""
+        now = datetime.now(timezone.utc).isoformat()
+        keys = {key for key, _ in issues}
+        with self.connect() as db:
+            for row in db.execute("SELECT issue_key FROM tasks WHERE state = 'queued'").fetchall():
+                if row[0] not in keys:
+                    db.execute("UPDATE tasks SET state='excluded', updated_at=? WHERE issue_key=?", (now, row[0]))
+            for key, summary in issues:
+                db.execute(
+                    """INSERT INTO tasks(issue_key,summary,state,created_at,updated_at)
+                    VALUES (?,?,'queued',?,?) ON CONFLICT(issue_key) DO UPDATE SET
+                    summary=excluded.summary, updated_at=excluded.updated_at,
+                    state=CASE WHEN tasks.state='excluded' THEN 'queued' ELSE tasks.state END""",
+                    (key, summary, now, now),
+                )
 
     def task_keys(self) -> set[str]:
         with self.connect() as db:

@@ -10,6 +10,7 @@ class RunOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
+    INTERRUPTED = "interrupted"
 
 
 class CodexRunResult(BaseModel):

@@ -24,16 +24,27 @@ class JiraClient:
         await self._client.aclose()
 
     async def search(self, jql: str, *, max_results: int = 50) -> list[JiraIssue]:
-        response = await self._client.get(
-            "/rest/api/3/search/jql",
-            params={
+        issues: list[JiraIssue] = []
+        seen_tokens: set[str] = set()
+        token: str | None = None
+        while True:
+            params = {
                 "jql": jql,
                 "maxResults": max_results,
                 "fields": "summary,description,status,assignee,labels",
-            },
-        )
-        response.raise_for_status()
-        return [JiraIssue.model_validate(issue) for issue in response.json().get("issues", [])]
+            }
+            if token:
+                params["nextPageToken"] = token
+            response = await self._client.get("/rest/api/3/search/jql", params=params)
+            response.raise_for_status()
+            payload = response.json()
+            issues.extend(JiraIssue.model_validate(issue) for issue in payload.get("issues", []))
+            token = payload.get("nextPageToken")
+            if payload.get("isLast") is True or not token:
+                return issues
+            if token in seen_tokens:
+                raise RuntimeError("Jira returned a repeated pagination token; queue was not synchronized")
+            seen_tokens.add(token)
 
     async def get_issue(self, key: str) -> JiraIssue:
         response = await self._client.get(

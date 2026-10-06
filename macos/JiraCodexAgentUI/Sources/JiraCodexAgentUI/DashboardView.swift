@@ -17,14 +17,25 @@ struct DashboardView: View {
         .sheet(isPresented: $store.isShowingSettings) {
             SettingsView().environmentObject(store)
         }
+        .alert("Task recovery failed", isPresented: Binding(get: { store.taskActionError != nil }, set: { if !$0 { store.taskActionError = nil } })) {
+            Button("OK") { store.taskActionError = nil }
+        } message: { Text(store.taskActionError ?? "") }
     }
 
     private var sidebar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "cpu.fill")
-                    .font(.title3)
-                    .foregroundStyle(AppTheme.accent)
+                if let url = Bundle.main.url(forResource: "logo", withExtension: "png"),
+                   let logo = NSImage(contentsOf: url) {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 32, height: 32)
+                } else {
+                    Image(systemName: "cpu.fill")
+                        .font(.title3)
+                        .foregroundStyle(AppTheme.accent)
+                }
                 Text("Jira Codex")
                     .font(.title2.bold())
                 Spacer()
@@ -46,30 +57,71 @@ struct DashboardView: View {
                 Button {
                     store.isShowingSettings = true
                 } label: {
-                    Label("Accounts & Settings", systemImage: "person.crop.circle.badge.gearshape")
+                    Label("Accounts & Settings", systemImage: "gearshape")
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+
+                Button {
+                    Task { await store.fetchJiraNow() }
+                } label: {
+                    Label(store.isFetchingJira ? "Fetching Jira…" : "Fetch Jira now", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                .disabled(store.connection != .online || store.isFetchingJira)
+                if let message = store.fetchJiraMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
 
                 Button {
                     Task { await store.refresh() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
 
                 Button {
                     Task { await store.togglePaused() }
                 } label: {
                     Label(store.isPaused ? "Resume agent" : "Pause agent", systemImage: store.isPaused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 14, weight: .semibold))
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .tint(store.isPaused ? .green : AppTheme.accent)
                 .disabled(store.connection != .online || store.isWorking)
+                if store.connection == .online {
+                    HStack {
+                        Button("Stop") { Task { await store.stopDaemon() } }
+                        Button("Restart") { Task { await store.stopDaemon(restart: true) } }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(store.isManagingDaemon)
+                } else {
+                    Button(store.isManagingDaemon ? "Starting…" : "Start daemon") { store.startDaemon() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(store.isManagingDaemon)
+                }
             }
             .padding(14)
         }
@@ -158,13 +210,14 @@ struct DashboardView: View {
     }
 
     private func count(for filter: TaskFilter) -> Int {
-        filter == .all ? store.tasks.count : store.tasks.filter { $0.state == filter.rawValue }.count
+        store.tasks.filter { filter.matches($0) }.count
     }
 }
 
 private struct TaskRow: View {
     @EnvironmentObject private var store: AgentStore
     let task: AgentTask
+    @State private var confirmingDelete = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -185,7 +238,21 @@ private struct TaskRow: View {
             }
             Spacer()
             TaskStateBadge(task: task)
+            if task.state == "review" {
+                Button("Review done") { Task { await store.taskAction("review_done", task: task) } }
+            }
+            if task.state == "interrupted" || task.state == "failed" {
+                Button("Resume task") { Task { await store.resumeTask(task) } }
+            }
             if task.worktree != nil {
+                Button { store.copyPath(task) } label: { Image(systemName: "doc.on.doc") }
+                    .buttonStyle(.borderless)
+                    .help("Copy worktree path")
+                if task.state == "failed" || task.state == "done" {
+                    Button { confirmingDelete = true } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help("Delete worktree")
+                }
                 Button { store.revealWorktree(task) } label: {
                     Image(systemName: "folder")
                 }
@@ -194,5 +261,11 @@ private struct TaskRow: View {
             }
         }
         .padding(.vertical, 7)
+        .alert("Delete worktree for \(task.issueKey)?", isPresented: $confirmingDelete) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) { Task { await store.taskAction("delete_worktree", task: task) } }
+        } message: {
+            Text("All files in \(task.worktree ?? "") will be removed, including uncommitted changes. Commit or back up your work first. The Git branch and task history are kept.")
+        }
     }
 }

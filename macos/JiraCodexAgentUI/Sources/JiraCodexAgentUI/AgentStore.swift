@@ -13,6 +13,50 @@ final class AgentStore: ObservableObject {
     @Published var selectedTaskID: AgentTask.ID?
     @Published var isWorking = false
     @Published var isShowingSettings = false
+    @Published private(set) var isManagingDaemon = false
+    @AppStorage("daemonProjectDirectory") var daemonProjectDirectory = ""
+    @AppStorage("daemonPythonPath") var daemonPythonPath = ""
+    private var daemonProcess: Process?
+    @Published var taskActionError: String?
+    @Published private(set) var isFetchingJira = false
+    @Published private(set) var fetchJiraMessage: String?
+
+    func fetchJiraNow() async {
+        guard !isFetchingJira else { return }
+        isFetchingJira = true
+        defer { isFetchingJira = false }
+        do {
+            let result = try await client.request("fetch_jira", socketPath: expandedSocketPath, as: FetchJiraResponse.self)
+            fetchJiraMessage = "Synced \(result.count) Jira tasks"
+            await refresh()
+        } catch {
+            fetchJiraMessage = nil
+            taskActionError = "Jira sync failed: \(error.localizedDescription)"
+        }
+    }
+
+    func copyPath(_ task: AgentTask) {
+        guard let path = task.worktree else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+    }
+
+    func taskAction(_ action: String, task: AgentTask) async {
+        do {
+            _ = try await client.request(action + ":" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
+            await refresh()
+        } catch { taskActionError = error.localizedDescription }
+    }
+
+    func resumeTask(_ task: AgentTask) async {
+        do {
+            _ = try await client.request("resume_task:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
+            taskActionError = nil
+            await refresh()
+        } catch {
+            taskActionError = error.localizedDescription
+        }
+    }
 
     @Published var jiraURL = ""
     @Published var jiraEmail = ""
@@ -21,6 +65,12 @@ final class AgentStore: ObservableObject {
     @Published var repositoryPath = ""
     @Published var baseBranch = "main"
     @Published var codexPath = "/opt/homebrew/bin/codex"
+    @Published var codexModel = ""
+    @Published private(set) var availableModels: [CodexModelOption] = []
+    @Published private(set) var modelCatalogError: String?
+    @Published private(set) var isLoadingModels = false
+    @Published var quotaFiveHourThreshold = 30
+    @Published var quotaWeeklyThreshold = 30
     @Published private(set) var codexStatus = "Checking…"
     @Published private(set) var configurationMessage: String?
 
@@ -36,6 +86,12 @@ final class AgentStore: ObservableObject {
     }
 
     init() {
+        if daemonProjectDirectory.isEmpty {
+            daemonProjectDirectory = Bundle.main.object(forInfoDictionaryKey: "AgentProjectDirectory") as? String ?? ""
+        }
+        if daemonPythonPath.isEmpty && !daemonProjectDirectory.isEmpty {
+            daemonPythonPath = daemonProjectDirectory + "/.venv/bin/python"
+        }
         loadConfiguration()
         Task { await checkCodexLogin() }
     }
@@ -50,7 +106,7 @@ final class AgentStore: ObservableObject {
     var queuedCount: Int { tasks.filter { $0.state == "queued" }.count }
 
     var filteredTasks: [AgentTask] {
-        selectedFilter == .all ? tasks : tasks.filter { $0.state == selectedFilter.rawValue }
+        tasks.filter { selectedFilter.matches($0) }
     }
 
     func startRefreshing() {
@@ -98,14 +154,67 @@ final class AgentStore: ObservableObject {
     }
 
     func startDaemon() {
+        guard !isManagingDaemon else { return }
+        Task { await launchDaemon() }
+    }
+
+    private func launchDaemon() async {
+        isManagingDaemon = true
+        defer { isManagingDaemon = false }
+        await refresh()
+        if connection == .online { return }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["kickstart", "-k", "gui/\(getuid())/com.jira-codex-agent"]
-        try? process.run()
-        Task {
-            try? await Task.sleep(for: .seconds(1))
-            await refresh()
+        process.executableURL = URL(fileURLWithPath: NSString(string: daemonPythonPath).expandingTildeInPath)
+        process.currentDirectoryURL = URL(fileURLWithPath: NSString(string: daemonProjectDirectory).expandingTildeInPath)
+        process.arguments = ["-m", "jira_codex_agent.main"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/jira-codex-agent/startup.log")
+        do {
+            try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            }
+            let log = try FileHandle(forWritingTo: logURL)
+            try log.seekToEnd()
+            process.standardOutput = log
+            process.standardError = log
+            try process.run()
+            daemonProcess = process
+            try? log.close()
+            for _ in 0..<30 {
+                try? await Task.sleep(for: .milliseconds(300))
+                await refresh()
+                if connection == .online { return }
+                if !process.isRunning { break }
+            }
+            taskActionError = "Daemon did not start. Check Python/project paths in Advanced and startup.log in Library/Logs/jira-codex-agent."
+        } catch {
+            taskActionError = "Could not start daemon: \(error.localizedDescription)"
         }
+    }
+
+    func stopDaemon(restart: Bool = false) async {
+        guard !isManagingDaemon else { return }
+        isManagingDaemon = true
+        do {
+            _ = try await client.request("stop", socketPath: expandedSocketPath, as: PauseResponse.self)
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(300))
+                if !FileManager.default.fileExists(atPath: expandedSocketPath) { break }
+            }
+            if FileManager.default.fileExists(atPath: expandedSocketPath) {
+                throw AgentClientError.server("Daemon is still stopping; restart was deferred.")
+            }
+            await refresh()
+            isManagingDaemon = false
+            if restart { await launchDaemon() }
+        } catch {
+            taskActionError = "Could not stop daemon: \(error.localizedDescription). An older daemon may need one final restart from Terminal."
+        }
+        isManagingDaemon = false
     }
 
     func saveConfiguration() {
@@ -117,7 +226,10 @@ final class AgentStore: ObservableObject {
             ("JCA_REPOSITORY", repositoryPath),
             ("JCA_BASE_BRANCH", baseBranch),
             ("JCA_CODEX_COMMAND", codexPath),
+            ("JCA_CODEX_MODEL", codexModel),
             ("JCA_SOCKET_PATH", socketPath),
+            ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
+            ("JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(quotaWeeklyThreshold)),
         ]
         let contents = values.map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
         do {
@@ -212,11 +324,26 @@ final class AgentStore: ObservableObject {
         repositoryPath = values["JCA_REPOSITORY"] ?? repositoryPath
         baseBranch = values["JCA_BASE_BRANCH"] ?? baseBranch
         codexPath = values["JCA_CODEX_COMMAND"] ?? codexPath
+        codexModel = values["JCA_CODEX_MODEL"] ?? codexModel
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
+        quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
+        quotaWeeklyThreshold = min(100, max(0, Int(values["JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
     }
 
     private func dotenvQuoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    func reloadModels() async {
+        guard !isLoadingModels else { return }
+        isLoadingModels = true
+        defer { isLoadingModels = false }
+        do {
+            availableModels = try await CodexCatalog.load(executable: codexPath)
+            modelCatalogError = nil
+        } catch {
+            modelCatalogError = error.localizedDescription
+        }
     }
 }

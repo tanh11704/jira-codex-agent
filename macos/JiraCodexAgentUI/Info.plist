@@ -10,6 +10,8 @@
   <string>JiraCodexAgentUI</string>
   <key>CFBundleIdentifier</key>
   <string>com.jira-codex-agent.ui</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -23,7 +25,7 @@
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
-  <true/>
+  <false/>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

@@ -42,3 +42,14 @@ class WorktreeManager:
         if process.returncode:
             raise GitError(stderr.decode(errors="replace").strip())
         return stdout.decode(errors="replace")
+
+    async def remove(self, issue_key: str, path: Path) -> None:
+        if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*-[0-9]+', issue_key):
+            raise GitError('Invalid issue key')
+        expected = self.root.resolve() / issue_key.lower()
+        if path.is_symlink() or path.resolve() != expected or expected == self.repository.resolve():
+            raise GitError('Refusing to remove a path outside the task worktree')
+        registered = await self._git('worktree', 'list', '--porcelain')
+        if f'worktree {expected}' not in registered.splitlines():
+            raise GitError('Path is not a registered worktree of this repository')
+        await self._git('worktree', 'remove', '--force', str(expected))

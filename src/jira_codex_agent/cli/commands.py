@@ -93,6 +93,15 @@ def resume() -> None:
     typer.echo("Agent resumed.")
 
 
+@app.command('resume-task')
+def resume_task(issue_key: str) -> None:
+    response = _call('resume_task:' + issue_key.upper())
+    if response.get('error'):
+        typer.echo(response['error'])
+        raise typer.Exit(1)
+    typer.echo('Task queued for recovery in its original worktree. Resume the agent if paused; dry-run must be disabled.')
+
+
 @app.command()
 def install_launchd(
     template: Path = typer.Option(Path("macos/com.jira-codex-agent.plist")),
