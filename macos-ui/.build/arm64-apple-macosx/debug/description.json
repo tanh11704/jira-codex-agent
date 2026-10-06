@@ -1,0 +1,279 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.JiraCodexAgentUI-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources",
+      "importPath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "JiraCodexAgentUI",
+      "moduleOutputPath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule",
+      "objects" : [
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "JiraCodexAgentUI_main",
+        "-color-diagnostics",
+        "-swift-version",
+        "6",
+        "-I",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-L",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-plugin-path",
+        "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "macos_ui"
+      ],
+      "outputFileMapPath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift",
+        "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift"
+      ],
+      "tempsPath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "JiraCodexAgentUI" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "JiraCodexAgentUI",
+      "-package-name",
+      "macos_ui",
+      "-c",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift",
+      "-I",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "JiraCodexAgentUI_main",
+      "-color-diagnostics",
+      "-swift-version",
+      "6",
+      "-I",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-L",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-plugin-path",
+      "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "macos_ui",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "JiraCodexAgentUI" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources"
+    },
+    "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist"
+    },
+    "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList"
+    },
+    "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}

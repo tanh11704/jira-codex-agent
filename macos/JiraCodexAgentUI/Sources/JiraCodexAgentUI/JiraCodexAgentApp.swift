@@ -1,0 +1,28 @@
+import SwiftUI
+
+@main
+struct JiraCodexAgentApp: App {
+    @StateObject private var store = AgentStore()
+
+    var body: some Scene {
+        Window("Jira Codex Agent", id: "dashboard") {
+            DashboardView().environmentObject(store)
+        }
+        .defaultSize(width: 1080, height: 700)
+
+        MenuBarExtra {
+            MenuBarView().environmentObject(store)
+        } label: {
+            Image(systemName: menuBarSymbol)
+        }
+        .menuBarExtraStyle(.window)
+    }
+
+    private var menuBarSymbol: String {
+        switch store.connection {
+        case .online: return store.isPaused ? "pause.circle.fill" : "cpu.fill"
+        case .connecting: return "ellipsis.circle"
+        case .offline: return "exclamationmark.circle.fill"
+        }
+    }
+}

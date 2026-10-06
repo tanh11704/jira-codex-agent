@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "JiraCodexAgentUI-arm64-apple-macosx-debug.module": ["<JiraCodexAgentUI-arm64-apple-macosx-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "jira-codex-agent-ui-arm64-apple-macosx-debug.exe": ["<jira-codex-agent-ui-arm64-apple-macosx-debug.exe>"]
+  "main": ["<JiraCodexAgentUI-arm64-apple-macosx-debug.module>","<jira-codex-agent-ui-arm64-apple-macosx-debug.exe>"]
+  "test": ["<JiraCodexAgentUI-arm64-apple-macosx-debug.module>","<jira-codex-agent-ui-arm64-apple-macosx-debug.exe>"]
+default: "main"
+nodes:
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui":
+    is-mutated: true
+commands:
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources"]
+    description: "Write auxiliary file /Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources"
+
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist"]
+    description: "Write auxiliary file /Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist"
+
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList"
+
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<JiraCodexAgentUI-arm64-apple-macosx-debug.module>":
+    tool: phony
+    inputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule"]
+    outputs: ["<JiraCodexAgentUI-arm64-apple-macosx-debug.module>"]
+
+  "<jira-codex-agent-ui-arm64-apple-macosx-debug.exe>":
+    tool: phony
+    inputs: ["<jira-codex-agent-ui-arm64-apple-macosx-debug.exe-CodeSigning>"]
+    outputs: ["<jira-codex-agent-ui-arm64-apple-macosx-debug.exe>"]
+
+  "C.JiraCodexAgentUI-arm64-apple-macosx-debug.module":
+    tool: shell
+    inputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule"]
+    description: "Compiling Swift Module 'JiraCodexAgentUI' (3 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","JiraCodexAgentUI","-emit-dependencies","-emit-module","-emit-module-path","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule","-output-file-map","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/output-file-map.json","-incremental","-c","@/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/sources","-I","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx14.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j8","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","JiraCodexAgentUI_main","-color-diagnostics","-swift-version","6","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","macos_ui"]
+
+  "C.jira-codex-agent-ui-arm64-apple-macosx-debug.exe":
+    tool: shell
+    inputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList"]
+    outputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/jira-codex-agent-ui"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug","-o","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui","-module-name","jira_codex_agent_ui","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_JiraCodexAgentUI_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx14.0","-Xlinker","-add_ast_path","-Xlinker","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/Modules/JiraCodexAgentUI.swiftmodule","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.jira-codex-agent-ui-arm64-apple-macosx-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist"]
+    outputs: ["<jira-codex-agent-ui-arm64-apple-macosx-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/jira-codex-agent-ui"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui-entitlement.plist","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/jira-codex-agent-ui"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Package.swift","/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

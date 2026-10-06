@@ -1,0 +1,26 @@
+{
+  "": {
+    "swift-dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/primary.swiftdeps"
+  },
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/AgentClient.swift": {
+    "dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.d",
+    "object": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swift.o",
+    "swiftmodule": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.swiftdeps",
+    "diagnostics": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/AgentClient.dia"
+  },
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/App.swift": {
+    "dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.d",
+    "object": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swift.o",
+    "swiftmodule": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.swiftdeps",
+    "diagnostics": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/App.dia"
+  },
+  "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/Sources/JiraCodexAgentUI/DashboardView.swift": {
+    "dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.d",
+    "object": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swift.o",
+    "swiftmodule": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.swiftdeps",
+    "diagnostics": "/Users/tanh11704/Workspace/Personal/jira-codex-agent/macos-ui/.build/arm64-apple-macosx/debug/JiraCodexAgentUI.build/DashboardView.dia"
+  }
+}
