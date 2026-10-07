@@ -27,7 +27,8 @@ struct QuotaInfo: Decodable {
 }
 
 struct QuotaResponse: Decodable {
-    let snapshot: QuotaInfo
+    let snapshot: QuotaInfo?
+    let checkedAt: String?
     let fiveHourThreshold: Int
     let weeklyThreshold: Int
 }

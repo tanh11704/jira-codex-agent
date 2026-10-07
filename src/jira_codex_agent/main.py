@@ -44,11 +44,17 @@ class ControlServer:
                 response = {"running": True, "paused": self.database.is_paused(), "current": coding[0] if coding else None}
             elif command == "tasks":
                 response = {"tasks": self.database.list_tasks()}
-            elif command == 'quota':
+            elif command in ('quota', 'quota_cached'):
                 if not self.orchestrator:
                     raise ValueError('Quota reader unavailable')
-                snapshot = await self.orchestrator.quota.read()
-                response = {'snapshot': snapshot.model_dump(mode='json'),
+                quota = self.orchestrator.quota
+                if command == 'quota':
+                    snapshot = await quota.read(force=True)
+                    self.orchestrator.wake_event.set()
+                else:
+                    snapshot = quota.cached
+                response = {'snapshot': snapshot.model_dump(mode='json') if snapshot else None,
+                            'checkedAt': quota.checked_at.isoformat() if quota.checked_at else None,
                             'fiveHourThreshold': self.orchestrator.settings.quota_remaining_threshold,
                             'weeklyThreshold': self.orchestrator.settings.quota_weekly_remaining_threshold}
             elif command == 'approvals':
@@ -133,7 +139,8 @@ async def run_daemon(settings: Settings | None = None) -> None:
         settings,
         database,
         jira,
-        CodexRunner(settings.codex_command, settings.codex_model, settings.max_task_seconds),
+        CodexRunner(settings.codex_command, settings.codex_model, settings.max_task_seconds,
+                    approvals_reviewer=settings.codex_approvals_reviewer),
         QuotaReader(settings.codex_command),
         WorktreeManager(settings.repository, settings.worktree_root, settings.base_branch),
     )

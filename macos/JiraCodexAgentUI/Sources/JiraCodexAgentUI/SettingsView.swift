@@ -66,6 +66,18 @@ struct SettingsView: View {
                     Button("Sign in with ChatGPT") { store.loginCodex() }
                         .buttonStyle(.borderedProminent)
                 }
+                Section("Approvals") {
+                    Picker("Approval mode", selection: $store.codexApprovalsReviewer) {
+                        Text("Ask for approval — you review").tag("user")
+                        Text("Approve for me — Codex reviews").tag("auto_review")
+                    }
+                    Text(store.codexApprovalsReviewer == "auto_review"
+                         ? "Codex evaluates eligible approval requests automatically. The workspace sandbox stays enabled; some requests may still need you. Auto-review can make mistakes and adds processing."
+                         : "Approval requests appear in the dashboard for you to approve or decline.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Save and restart the daemon to apply to new or resumed tasks.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Pause when remaining quota reaches") {
                     Stepper("5 hours: \(store.quotaFiveHourThreshold)%", value: $store.quotaFiveHourThreshold, in: 0...100)
                     Stepper("7 days: \(store.quotaWeeklyThreshold)%", value: $store.quotaWeeklyThreshold, in: 0...100)

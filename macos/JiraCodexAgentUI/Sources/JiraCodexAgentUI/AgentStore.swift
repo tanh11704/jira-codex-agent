@@ -27,15 +27,20 @@ final class AgentStore: ObservableObject {
     @Published private(set) var quotaUpdatedAt: Date?
     @Published private(set) var isLoadingQuota = false
 
-    func refreshQuota() async {
+    func refreshQuota(force: Bool = true) async {
         guard !isLoadingQuota else { return }
         isLoadingQuota = true
         defer { isLoadingQuota = false }
         do {
-            let response = try await client.request("quota", socketPath: expandedSocketPath, as: QuotaResponse.self)
+            let response = try await client.request(force ? "quota" : "quota_cached", socketPath: expandedSocketPath, as: QuotaResponse.self)
             quota = response
-            quotaError = response.snapshot.error
-            quotaUpdatedAt = Date()
+            quotaError = response.snapshot?.error
+            quotaUpdatedAt = response.checkedAt.flatMap { ISO8601DateFormatter().date(from: $0) }
+            if quotaUpdatedAt == nil, let checked = response.checkedAt {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                quotaUpdatedAt = formatter.date(from: checked)
+            }
         } catch {
             quota = nil
             quotaError = error.localizedDescription
@@ -129,6 +134,7 @@ final class AgentStore: ObservableObject {
     @Published var baseBranch = "main"
     @Published var codexPath = "/opt/homebrew/bin/codex"
     @Published var codexModel = ""
+    @Published var codexApprovalsReviewer = "user"
     @Published private(set) var availableModels: [CodexModelOption] = []
     @Published private(set) var modelCatalogError: String?
     @Published private(set) var isLoadingModels = false
@@ -196,6 +202,7 @@ final class AgentStore: ObservableObject {
             tasks = newTasks.tasks
             connection = .online
             lastUpdated = Date()
+            await refreshQuota(force: false)
         } catch {
             connection = .offline(error.localizedDescription)
             tasks = []
@@ -290,6 +297,7 @@ final class AgentStore: ObservableObject {
             ("JCA_BASE_BRANCH", baseBranch),
             ("JCA_CODEX_COMMAND", codexPath),
             ("JCA_CODEX_MODEL", codexModel),
+            ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
             ("JCA_SOCKET_PATH", socketPath),
             ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
             ("JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(quotaWeeklyThreshold)),
@@ -388,6 +396,7 @@ final class AgentStore: ObservableObject {
         baseBranch = values["JCA_BASE_BRANCH"] ?? baseBranch
         codexPath = values["JCA_CODEX_COMMAND"] ?? codexPath
         codexModel = values["JCA_CODEX_MODEL"] ?? codexModel
+        codexApprovalsReviewer = values["JCA_CODEX_APPROVALS_REVIEWER"] == "auto_review" ? "auto_review" : "user"
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
         quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         quotaWeeklyThreshold = min(100, max(0, Int(values["JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))

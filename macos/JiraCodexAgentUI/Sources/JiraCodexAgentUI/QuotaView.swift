@@ -19,22 +19,16 @@ struct QuotaView: View {
                 Text("Quota unavailable: \(error)").font(.caption).foregroundStyle(.orange)
             } else {
                 HStack(spacing: 20) {
-                    window("5 hours", info: store.quota?.snapshot.fiveHour, threshold: store.quota?.fiveHourThreshold)
-                    window("7 days", info: store.quota?.snapshot.weekly, threshold: store.quota?.weeklyThreshold)
+                    window("5 hours", info: store.quota?.snapshot?.fiveHour, threshold: store.quota?.fiveHourThreshold)
+                    window("7 days", info: store.quota?.snapshot?.weekly, threshold: store.quota?.weeklyThreshold)
                 }
-                if store.quota?.snapshot.ordinary_usage_allowed == false {
+                if store.quota?.snapshot?.ordinary_usage_allowed == false {
                     Text("Codex reports usage unavailable. New tasks will wait.").font(.caption).foregroundStyle(.orange)
                 }
             }
         }
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .task {
-            while !Task.isCancelled {
-                await store.refreshQuota()
-                do { try await Task.sleep(for: .seconds(60)) } catch { break }
-            }
-        }
     }
 
     private func window(_ title: String, info: QuotaWindowInfo?, threshold: Int?) -> some View {

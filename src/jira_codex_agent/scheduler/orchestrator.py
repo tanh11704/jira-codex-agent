@@ -191,7 +191,8 @@ class Orchestrator:
                 return False
             log.info("quota blocked (%s); sleeping %.0fs", [(w.window_minutes, w.remaining_percent) for w in blocked], seconds)
             try:
-                await asyncio.wait_for(self.stop_event.wait(), timeout=seconds + 5)
+                await asyncio.wait_for(self.wake_event.wait(), timeout=seconds + 5)
+                self.wake_event.clear()
             except TimeoutError:
                 continue
         return False

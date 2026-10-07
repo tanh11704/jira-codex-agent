@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 
 from .models import QuotaSnapshot, QuotaWindow
@@ -13,8 +14,21 @@ class QuotaReader:
     def __init__(self, command: str = "codex", timeout: float = 15) -> None:
         self.command = command
         self.timeout = timeout
+        self.cached: QuotaSnapshot | None = None
+        self.checked_at: datetime | None = None
+        self._checked_monotonic = 0.0
+        self._lock = asyncio.Lock()
 
-    async def read(self) -> QuotaSnapshot:
+    async def read(self, *, force: bool = False) -> QuotaSnapshot:
+        async with self._lock:
+            if not force and self.cached is not None and time.monotonic() - self._checked_monotonic < 30:
+                return self.cached
+            self.cached = await self._read_live()
+            self.checked_at = datetime.now(timezone.utc)
+            self._checked_monotonic = time.monotonic()
+            return self.cached
+
+    async def _read_live(self) -> QuotaSnapshot:
         process = await asyncio.create_subprocess_exec(
             self.command,
             "app-server",

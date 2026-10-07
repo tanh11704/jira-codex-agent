@@ -18,7 +18,7 @@ for raw in sys.stdin:
   send({'id':m['id'],'result':{}})
  elif method in ('thread/start','thread/resume'):
   assert m['params']['approvalPolicy'] == 'on-request'
-  assert m['params']['sandbox'] == 'workspaceWrite'
+  assert m['params']['sandbox'] == 'workspace-write'
   assert m['params']['approvalsReviewer'] == 'user'
   send({'id':m['id'],'result':{'thread':{'id':m['params'].get('threadId','thread-1')}}})
  elif method == 'turn/start':
@@ -84,6 +84,24 @@ def test_no_automatic_or_session_wide_approval():
     runner = CodexRunner()
     with pytest.raises(ValueError):
         runner.answer_approval('unknown', 'acceptForSession')
+
+
+@pytest.mark.asyncio
+async def test_auto_review_config_keeps_sandbox_and_manual_fallback(tmp_path):
+    path = tmp_path / 'fake-codex'
+    path.write_text(SERVER.replace("== 'user'", "== 'auto_review'"))
+    path.chmod(0o700)
+    runner = CodexRunner(str(path), approvals_reviewer='auto_review')
+    task = asyncio.create_task(runner.run('Do work', tmp_path, session_id='existing-thread'))
+    token = await wait_approval(runner)
+    assert not task.done()
+    runner.answer_approval(token, 'decline')
+    assert (await asyncio.wait_for(task, 3)).outcome == RunOutcome.SUCCEEDED
+
+
+def test_invalid_reviewer_rejected():
+    with pytest.raises(ValueError):
+        CodexRunner(approvals_reviewer='never')
 
 
 @pytest.mark.asyncio

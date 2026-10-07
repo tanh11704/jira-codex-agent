@@ -11,10 +11,10 @@ from jira_codex_agent.main import ControlServer
 
 @pytest.mark.asyncio
 async def test_quota_endpoint_returns_live_daemon_thresholds(tmp_path):
-    quota = SimpleNamespace(read=AsyncMock(return_value=QuotaSnapshot(
+    quota = SimpleNamespace(checked_at=None, read=AsyncMock(return_value=QuotaSnapshot(
         primary=QuotaWindow(used_percent=15, window_minutes=300),
         secondary=QuotaWindow(used_percent=80, window_minutes=10080))))
-    agent = SimpleNamespace(quota=quota, settings=SimpleNamespace(
+    agent = SimpleNamespace(quota=quota, wake_event=asyncio.Event(), settings=SimpleNamespace(
         quota_remaining_threshold=20, quota_weekly_remaining_threshold=35))
     control = ControlServer(tmp_path / 'socket', None, agent)
     reader = asyncio.StreamReader()

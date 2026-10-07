@@ -8,7 +8,10 @@ from .models import CodexRunResult, RunOutcome
 
 
 class CodexRunner:
-    def __init__(self, command='codex', model=None, timeout=7200):
+    def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user'):
+        if approvals_reviewer not in ('user', 'auto_review'):
+            raise ValueError('Unsupported approval reviewer')
+        self.approvals_reviewer = approvals_reviewer
         self.command, self.model, self.timeout = command, model, timeout
         self.approvals, self._answers = {}, {}
 
@@ -145,8 +148,8 @@ class CodexRunner:
         try:
             await request('initialize', {'clientInfo': {'name': 'jira_codex_agent', 'version': '0.1.0'}})
             await send({'method': 'initialized', 'params': {}})
-            config = {'cwd': str(cwd), 'approvalPolicy': 'on-request', 'sandbox': 'workspaceWrite',
-                      'approvalsReviewer': 'user'}
+            config = {'cwd': str(cwd), 'approvalPolicy': 'on-request', 'sandbox': 'workspace-write',
+                      'approvalsReviewer': self.approvals_reviewer}
             if self.model:
                 config['model'] = self.model
             if session_id:

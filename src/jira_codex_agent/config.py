@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
 
     codex_command: str = "codex"
     codex_model: str | None = None
+    codex_approvals_reviewer: Literal['user', 'auto_review'] = 'user'
 
     @field_validator("codex_model", mode="before")
     @classmethod
