@@ -134,6 +134,8 @@ final class AgentStore: ObservableObject {
     @Published var baseBranch = "main"
     @Published var codexPath = "/opt/homebrew/bin/codex"
     @Published var codexModel = ""
+    static let defaultTaskPrompt = "Work autonomously in this repository. Inspect existing conventions first, implement the smallest complete solution, and run relevant tests. Do not push, open a pull request, or change Jira. Leave all changes in the current worktree and finish with a concise summary plus any human-review notes."
+    @Published var taskPrompt = AgentStore.defaultTaskPrompt
     @Published var codexApprovalsReviewer = "user"
     @Published private(set) var availableModels: [CodexModelOption] = []
     @Published private(set) var modelCatalogError: String?
@@ -297,6 +299,7 @@ final class AgentStore: ObservableObject {
             ("JCA_BASE_BRANCH", baseBranch),
             ("JCA_CODEX_COMMAND", codexPath),
             ("JCA_CODEX_MODEL", codexModel),
+            ("JCA_CODEX_PROMPT_BASE64", Data(taskPrompt.utf8).base64EncodedString()),
             ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
             ("JCA_SOCKET_PATH", socketPath),
             ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
@@ -396,6 +399,10 @@ final class AgentStore: ObservableObject {
         baseBranch = values["JCA_BASE_BRANCH"] ?? baseBranch
         codexPath = values["JCA_CODEX_COMMAND"] ?? codexPath
         codexModel = values["JCA_CODEX_MODEL"] ?? codexModel
+        if let encoded = values["JCA_CODEX_PROMPT_BASE64"], let data = Data(base64Encoded: encoded),
+           let text = String(data: data, encoding: .utf8), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            taskPrompt = text
+        }
         codexApprovalsReviewer = values["JCA_CODEX_APPROVALS_REVIEWER"] == "auto_review" ? "auto_review" : "user"
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
         quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))

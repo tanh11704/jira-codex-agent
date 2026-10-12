@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import base64
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 USER_CONFIG_PATH = Path("~/.config/jira-codex-agent/config.env").expanduser()
+DEFAULT_TASK_INSTRUCTIONS = "Work autonomously in this repository. Inspect existing conventions first, implement the smallest complete solution, and run relevant tests. Do not push, open a pull request, or change Jira. Leave all changes in the current worktree and finish with a concise summary plus any human-review notes."
 
 
 class Settings(BaseSettings):
@@ -34,6 +36,19 @@ class Settings(BaseSettings):
 
     codex_command: str = "codex"
     codex_model: str | None = None
+    codex_prompt_base64: str = ''
+
+    @field_validator('codex_prompt_base64')
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        if value:
+            base64.b64decode(value, validate=True).decode('utf-8')
+        return value
+
+    @property
+    def task_instructions(self) -> str:
+        text = base64.b64decode(self.codex_prompt_base64).decode('utf-8') if self.codex_prompt_base64 else ''
+        return text.strip() or DEFAULT_TASK_INSTRUCTIONS
     codex_approvals_reviewer: Literal['user', 'auto_review'] = 'user'
 
     @field_validator("codex_model", mode="before")

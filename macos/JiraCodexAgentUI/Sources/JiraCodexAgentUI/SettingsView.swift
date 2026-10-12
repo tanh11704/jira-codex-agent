@@ -84,6 +84,17 @@ struct SettingsView: View {
                     Text("Either limit pauses new tasks. Save and restart the daemon to apply.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section("Task prompt") {
+                    Text("Instructions applied to every task. Jira key, title and description are added automatically.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $store.taskPrompt)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 160)
+                        .accessibilityLabel("Task prompt instructions")
+                    Button("Restore default prompt") { store.taskPrompt = AgentStore.defaultTaskPrompt }
+                    Text("Save and restart the daemon. Applies to new and resumed tasks, not a task already running. An empty prompt uses the default.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Default model for new tasks") {
                     Picker("Model", selection: $store.codexModel) {
                         Text("Use Codex CLI configuration").tag("")

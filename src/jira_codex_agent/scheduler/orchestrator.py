@@ -197,13 +197,12 @@ class Orchestrator:
                 continue
         return False
 
-    @staticmethod
-    def _prompt(issue: JiraIssue) -> str:
+    def _prompt(self, issue: JiraIssue) -> str:
         description = adf_to_text(issue.fields.description).strip() or "No description supplied."
         return f"""Implement Jira issue {issue.key}: {issue.summary}
 
 Description:
 {description}
 
-Work autonomously in this repository. Inspect existing conventions first, implement the smallest complete solution, and run relevant tests. Do not push, open a pull request, or change Jira. Leave all changes in the current worktree and finish with a concise summary plus any human-review notes.
+{self.settings.task_instructions}
 """
