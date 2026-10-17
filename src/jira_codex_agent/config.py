@@ -36,6 +36,10 @@ class Settings(BaseSettings):
 
     codex_command: str = "codex"
     codex_model: str | None = None
+    # Reasoning effort advertised by the model (e.g. low, medium, high, xhigh, max, ultra); None uses the model default.
+    codex_reasoning_effort: str | None = None
+    # Service tier id from the model catalog (e.g. "priority" for Fast); None uses standard speed.
+    codex_service_tier: str | None = None
     codex_prompt_base64: str = ''
 
     @field_validator('codex_prompt_base64')
@@ -51,7 +55,7 @@ class Settings(BaseSettings):
         return text.strip() or DEFAULT_TASK_INSTRUCTIONS
     codex_approvals_reviewer: Literal['user', 'auto_review'] = 'user'
 
-    @field_validator("codex_model", mode="before")
+    @field_validator("codex_model", "codex_reasoning_effort", "codex_service_tier", mode="before")
     @classmethod
     def normalize_model(cls, value: str | None) -> str | None:
         return value.strip() or None if value is not None else None

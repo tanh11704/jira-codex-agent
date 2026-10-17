@@ -8,13 +8,15 @@ from .models import CodexRunResult, RunOutcome
 
 
 class CodexRunner:
-    def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0):
+    def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0,
+                 reasoning_effort=None, service_tier=None):
         if approvals_reviewer not in ('user', 'auto_review'):
             raise ValueError('Unsupported approval reviewer')
         self.approvals_reviewer = approvals_reviewer
         # Seconds to wait for a human before declining; 0 waits forever.
         self.approval_timeout = approval_timeout
         self.command, self.model, self.timeout = command, model, timeout
+        self.reasoning_effort, self.service_tier = reasoning_effort, service_tier
         self.approvals, self._answers = {}, {}
 
     def answer_approval(self, token, decision):
@@ -192,12 +194,16 @@ class CodexRunner:
                       'approvalsReviewer': self.approvals_reviewer}
             if self.model:
                 config['model'] = self.model
+            if self.service_tier:
+                config['serviceTier'] = self.service_tier
             if session_id:
                 config['threadId'] = session_id
             thread = await request('thread/resume' if session_id else 'thread/start', config)
             session_id = thread['thread']['id']
             emit({'type': 'thread.started', 'thread_id': session_id})
             turn = {'threadId': session_id, 'input': [{'type': 'text', 'text': prompt}]}
+            if self.reasoning_effort:
+                turn['effort'] = self.reasoning_effort
             if output_schema:
                 turn['outputSchema'] = output_schema
             await request('turn/start', turn)

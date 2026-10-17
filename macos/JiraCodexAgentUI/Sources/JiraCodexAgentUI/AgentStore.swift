@@ -155,6 +155,8 @@ final class AgentStore: ObservableObject {
     @Published var baseBranch = "main"
     @Published var codexPath = "/opt/homebrew/bin/codex"
     @Published var codexModel = ""
+    @Published var codexReasoningEffort = ""
+    @Published var codexServiceTier = ""
     static let defaultTaskPrompt = """
     You are an autonomous implementation agent working on ONE Jira issue in a dedicated TeachMate EMS / ExamTwin Git worktree. Implement only that issue and hand off local changes for human review.
 
@@ -206,6 +208,7 @@ final class AgentStore: ObservableObject {
     @Published var quotaWeeklyThreshold = 30
     @Published private(set) var codexStatus = "Checking…"
     @Published private(set) var configurationMessage: String?
+    @Published private(set) var savedConfiguration = ""
 
     @AppStorage("socketPath") var socketPath = "~/.local/share/jira-codex-agent/agent.sock"
 
@@ -372,7 +375,7 @@ final class AgentStore: ObservableObject {
         isManagingDaemon = false
     }
 
-    func saveConfiguration() {
+    var configurationContents: String {
         let values: [(String, String)] = [
             ("JCA_JIRA_URL", jiraURL),
             ("JCA_JIRA_EMAIL", jiraEmail),
@@ -382,6 +385,8 @@ final class AgentStore: ObservableObject {
             ("JCA_BASE_BRANCH", baseBranch),
             ("JCA_CODEX_COMMAND", codexPath),
             ("JCA_CODEX_MODEL", codexModel),
+            ("JCA_CODEX_REASONING_EFFORT", codexReasoningEffort),
+            ("JCA_CODEX_SERVICE_TIER", codexServiceTier),
             ("JCA_CODEX_PROMPT_BASE64", Data(taskPrompt.utf8).base64EncodedString()),
             ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
             ("JCA_SOCKET_PATH", socketPath),
@@ -393,7 +398,13 @@ final class AgentStore: ObservableObject {
             ("JCA_PREVENT_SLEEP", preventSleep ? "true" : "false"),
             ("JCA_NOTIFICATIONS", notificationsEnabled ? "true" : "false"),
         ]
-        let contents = values.map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
+        return values.map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
+    }
+
+    var hasUnsavedChanges: Bool { configurationContents != savedConfiguration }
+
+    func saveConfiguration() {
+        let contents = configurationContents
         do {
             try FileManager.default.createDirectory(
                 at: configURL.deletingLastPathComponent(),
@@ -401,7 +412,8 @@ final class AgentStore: ObservableObject {
             )
             try contents.write(to: configURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
-            configurationMessage = "Saved. Restart the daemon to apply changes."
+            savedConfiguration = contents
+            configurationMessage = connection == .online ? "Saved. Restart the daemon to apply changes." : "Saved."
         } catch {
             configurationMessage = "Could not save: \(error.localizedDescription)"
         }
@@ -487,6 +499,8 @@ final class AgentStore: ObservableObject {
         baseBranch = values["JCA_BASE_BRANCH"] ?? baseBranch
         codexPath = values["JCA_CODEX_COMMAND"] ?? codexPath
         codexModel = values["JCA_CODEX_MODEL"] ?? codexModel
+        codexReasoningEffort = values["JCA_CODEX_REASONING_EFFORT"] ?? codexReasoningEffort
+        codexServiceTier = values["JCA_CODEX_SERVICE_TIER"] ?? codexServiceTier
         if let encoded = values["JCA_CODEX_PROMPT_BASE64"], let data = Data(base64Encoded: encoded),
            let text = String(data: data, encoding: .utf8), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             taskPrompt = text
@@ -500,11 +514,55 @@ final class AgentStore: ObservableObject {
         historyRetentionDays = max(1, Int(values["JCA_HISTORY_RETENTION_DAYS"] ?? "30") ?? 30)
         preventSleep = values["JCA_PREVENT_SLEEP"] != "false"
         notificationsEnabled = values["JCA_NOTIFICATIONS"] != "false"
+        savedConfiguration = configurationContents
     }
 
     private func dotenvQuoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    func saveAndRestartDaemon() async {
+        saveConfiguration()
+        guard !hasUnsavedChanges, connection == .online else { return }
+        await stopDaemon(restart: true)
+        if connection == .online {
+            configurationMessage = "Saved and restarted. New settings apply to new and resumed tasks."
+        }
+    }
+
+    /// The catalog entry for the configured model, or the Codex default when none is configured.
+    var selectedModelOption: CodexModelOption? {
+        codexModel.isEmpty ? availableModels.first(where: \.isDefault)
+                           : availableModels.first(where: { $0.model == codexModel })
+    }
+
+    func selectModel(_ model: String) {
+        codexModel = model
+        normalizeModelOptions()
+    }
+
+    /// Drops an effort or speed the selected model does not advertise, so Codex never rejects a turn.
+    private func normalizeModelOptions() {
+        guard let option = selectedModelOption else { return }
+        if !codexReasoningEffort.isEmpty && !option.efforts.contains(where: { $0.reasoningEffort == codexReasoningEffort }) {
+            codexReasoningEffort = ""
+        }
+        if !codexServiceTier.isEmpty && !option.tiers.contains(where: { $0.id == codexServiceTier }) {
+            codexServiceTier = ""
+        }
+    }
+
+    var codexRunSummary: String {
+        let option = selectedModelOption
+        let model = option?.displayName ?? (codexModel.isEmpty ? "Codex default" : codexModel)
+        let effort = codexReasoningEffort.isEmpty ? option?.defaultReasoningEffort : codexReasoningEffort
+        var parts = [model]
+        if let effort { parts.append(ReasoningLevel.title(effort) + (codexReasoningEffort.isEmpty ? " (default)" : "")) }
+        if !codexServiceTier.isEmpty {
+            parts.append(option?.tiers.first(where: { $0.id == codexServiceTier })?.name ?? codexServiceTier)
+        }
+        return parts.joined(separator: " · ")
     }
 
     func reloadModels() async {
@@ -514,6 +572,7 @@ final class AgentStore: ObservableObject {
         do {
             availableModels = try await CodexCatalog.load(executable: codexPath)
             modelCatalogError = nil
+            normalizeModelOptions()
         } catch {
             modelCatalogError = error.localizedDescription
         }

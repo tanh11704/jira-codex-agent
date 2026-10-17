@@ -123,3 +123,39 @@ async def test_file_and_permission_approvals(tmp_path, kind, decision):
         assert response == {'scope': 'turn', 'permissions': {'network': {'enabled': True}} if decision == 'accept' else {}}
     else:
         assert response == {'decision': decision}
+
+
+SETTINGS_SERVER = '''#!/usr/bin/env python3
+import json, sys
+def send(m):
+ print(json.dumps(m), flush=True)
+thread = {}
+for raw in sys.stdin:
+ m = json.loads(raw)
+ method = m.get('method')
+ if method == 'initialize':
+  send({'id':m['id'],'result':{}})
+ elif method in ('thread/start','thread/resume'):
+  thread = m['params']
+  send({'id':m['id'],'result':{'thread':{'id':'thread-1'}}})
+ elif method == 'turn/start':
+  sent = {'model': thread.get('model'), 'serviceTier': thread.get('serviceTier'), 'effort': m['params'].get('effort')}
+  send({'id':m['id'],'result':{'turn':{'id':'turn-1'}}})
+  send({'method':'item/completed','params':{'item':{'type':'agentMessage','text':json.dumps(sent)}}})
+  send({'method':'turn/completed','params':{'turn':{'status':'completed'}}})
+'''
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kwargs, expected', [
+    ({}, {'model': None, 'serviceTier': None, 'effort': None}),
+    ({'model': 'gpt-x', 'reasoning_effort': 'xhigh', 'service_tier': 'priority'},
+     {'model': 'gpt-x', 'serviceTier': 'priority', 'effort': 'xhigh'}),
+])
+async def test_model_effort_and_speed_are_forwarded(tmp_path, kwargs, expected):
+    path = tmp_path / 'fake-codex'
+    path.write_text(SETTINGS_SERVER)
+    path.chmod(0o700)
+    result = await asyncio.wait_for(CodexRunner(str(path), **kwargs).run('Do work', tmp_path), 5)
+    assert result.outcome == RunOutcome.SUCCEEDED
+    assert json.loads(result.final_message) == expected

@@ -12,10 +12,13 @@ from .app_server import CodexRunner
 
 
 class ExecRunner:
-    def __init__(self, command: str = "codex", model: str | None = None, timeout: int = 7200) -> None:
+    def __init__(self, command: str = "codex", model: str | None = None, timeout: int = 7200,
+                 reasoning_effort: str | None = None, service_tier: str | None = None) -> None:
         self.command = command
         self.model = model
         self.timeout = timeout
+        self.reasoning_effort = reasoning_effort
+        self.service_tier = service_tier
 
     async def run(self, prompt: str, cwd: Path, *, session_id: str | None = None,
                   on_event: Callable[[dict], None] | None = None,
@@ -24,6 +27,10 @@ class ExecRunner:
         args = [self.command, "exec", "--json", "--sandbox", "workspace-write", "--cd", str(cwd)]
         if self.model:
             args.extend(["--model", self.model])
+        if self.reasoning_effort:
+            args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
+        if self.service_tier:
+            args.extend(["-c", f'service_tier="{self.service_tier}"'])
         if session_id:
             args.extend(["resume", session_id])
         args.append("-")

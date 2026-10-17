@@ -1,10 +1,61 @@
 import Foundation
 
+struct CodexReasoningEffort: Decodable, Hashable, Sendable {
+    let reasoningEffort: String
+    let description: String?
+}
+
+struct CodexServiceTier: Decodable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let description: String?
+}
+
 struct CodexModelOption: Decodable, Identifiable, Sendable {
     let id: String
     let model: String
     let displayName: String
     let isDefault: Bool
+    // Optional so older Codex CLIs without these fields still decode.
+    let description: String?
+    let hidden: Bool?
+    let supportedReasoningEfforts: [CodexReasoningEffort]?
+    let defaultReasoningEffort: String?
+    let serviceTiers: [CodexServiceTier]?
+
+    var efforts: [CodexReasoningEffort] { supportedReasoningEfforts ?? [] }
+    var tiers: [CodexServiceTier] { serviceTiers ?? [] }
+}
+
+enum ReasoningLevel {
+    static func title(_ effort: String) -> String {
+        switch effort {
+        case "none": return "None"
+        case "minimal": return "Minimal"
+        case "low": return "Low"
+        case "medium": return "Medium"
+        case "high": return "High"
+        case "xhigh": return "Extra high"
+        case "max": return "Max"
+        case "ultra": return "Ultra"
+        default: return effort.prefix(1).uppercased() + effort.dropFirst()
+        }
+    }
+
+    static func symbol(_ effort: String) -> String {
+        switch effort {
+        case "none", "minimal", "low": return "hare"
+        case "medium": return "gauge.medium"
+        case "high", "xhigh": return "brain"
+        case "max", "ultra": return "brain.head.profile"
+        default: return "brain"
+        }
+    }
+
+    /// Levels that noticeably increase quota usage and run time.
+    static func isExpensive(_ effort: String) -> Bool {
+        ["xhigh", "max", "ultra"].contains(effort)
+    }
 }
 
 private struct ModelPage: Decodable {
@@ -64,7 +115,7 @@ enum CodexCatalog {
                 if let cursor { params["cursor"] = cursor }
                 try send(["id": id, "method": "model/list", "params": params])
                 let page = try JSONDecoder().decode(ModelPage.self, from: response(id))
-                models.append(contentsOf: page.data)
+                models.append(contentsOf: page.data.filter { $0.hidden != true })
                 cursor = page.nextCursor
                 if let cursor, !seen.insert(cursor).inserted { throw AgentClientError.invalidResponse }
                 id += 1
