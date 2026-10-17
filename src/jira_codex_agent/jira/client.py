@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from .models import JiraIssue
+
+log = logging.getLogger(__name__)
+
+FIELDS = "summary,description,status,assignee,labels,issuetype,priority,issuelinks"
 
 
 class JiraClient:
@@ -13,6 +19,8 @@ class JiraClient:
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=timeout,
         )
+        self._flag_field: str | None = None
+        self._flag_field_loaded = False
 
     async def __aenter__(self) -> "JiraClient":
         return self
@@ -23,15 +31,33 @@ class JiraClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def flag_field(self) -> str | None:
+        """ID of the site's "Flagged" (impediment) custom field, if it has one."""
+        if not self._flag_field_loaded:
+            try:
+                response = await self._client.get("/rest/api/3/field")
+                response.raise_for_status()
+                self._flag_field = next((field["id"] for field in response.json()
+                                         if field.get("name") == "Flagged"), None)
+            except Exception:  # optional feature; never block queue sync on it
+                log.warning("could not discover Jira Flagged field; flag detection disabled")
+            self._flag_field_loaded = True
+        return self._flag_field
+
+    async def _fields(self) -> str:
+        flag = await self.flag_field()
+        return FIELDS + (f",{flag}" if flag else "")
+
     async def search(self, jql: str, *, max_results: int = 50) -> list[JiraIssue]:
         issues: list[JiraIssue] = []
         seen_tokens: set[str] = set()
         token: str | None = None
+        fields = await self._fields()
         while True:
             params = {
                 "jql": jql,
                 "maxResults": max_results,
-                "fields": "summary,description,status,assignee,labels",
+                "fields": fields,
             }
             if token:
                 params["nextPageToken"] = token
@@ -49,7 +75,7 @@ class JiraClient:
     async def get_issue(self, key: str) -> JiraIssue:
         response = await self._client.get(
             f"/rest/api/3/issue/{key}",
-            params={"fields": "summary,description,status,assignee,labels"},
+            params={"fields": await self._fields()},
         )
         response.raise_for_status()
         return JiraIssue.model_validate(response.json())

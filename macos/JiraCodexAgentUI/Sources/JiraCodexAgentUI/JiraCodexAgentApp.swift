@@ -15,7 +15,7 @@ struct JiraCodexAgentApp: App {
         Window("Jira Codex Agent", id: "dashboard") {
             DashboardView().environmentObject(store)
         }
-        .defaultSize(width: 1080, height: 700)
+        .defaultSize(width: 1280, height: 760)
 
         MenuBarExtra {
             MenuBarView().environmentObject(store)

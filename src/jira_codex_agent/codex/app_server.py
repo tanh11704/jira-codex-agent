@@ -8,10 +8,12 @@ from .models import CodexRunResult, RunOutcome
 
 
 class CodexRunner:
-    def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user'):
+    def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0):
         if approvals_reviewer not in ('user', 'auto_review'):
             raise ValueError('Unsupported approval reviewer')
         self.approvals_reviewer = approvals_reviewer
+        # Seconds to wait for a human before declining; 0 waits forever.
+        self.approval_timeout = approval_timeout
         self.command, self.model, self.timeout = command, model, timeout
         self.approvals, self._answers = {}, {}
 
@@ -23,7 +25,39 @@ class CodexRunner:
             raise ValueError('Approval expired or already answered; refresh dashboard')
         future.set_result(decision)
 
-    async def run(self, prompt, cwd, *, session_id=None, on_event=None):
+    async def archive_thread(self, thread_id):
+        """Archive a Codex thread so discarded work disappears from Codex history."""
+        process = await asyncio.create_subprocess_exec(
+            self.command, 'app-server', '--listen', 'stdio://',
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+
+        async def call(key, method, params):
+            process.stdin.write((json.dumps({'id': key, 'method': method, 'params': params}) + '\n').encode())
+            await process.stdin.drain()
+            while line := await process.stdout.readline():
+                message = json.loads(line)
+                if message.get('id') == key and 'method' not in message:
+                    if 'error' in message:
+                        raise RuntimeError(str(message['error']))
+                    return message.get('result', {})
+            raise RuntimeError('Codex app-server closed')
+
+        try:
+            async with asyncio.timeout(20):
+                await call(1, 'initialize', {'clientInfo': {'name': 'jira_codex_agent', 'version': '0.1.0'}})
+                process.stdin.write(b'{"method": "initialized", "params": {}}\n')
+                await call(2, 'thread/archive', {'threadId': thread_id})
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 3)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+
+    async def run(self, prompt, cwd, *, session_id=None, on_event=None, output_schema=None):
         process = await asyncio.create_subprocess_exec(
             self.command, 'app-server', '--listen', 'stdio://',
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -79,7 +113,13 @@ class CodexRunner:
             self.approvals[token], self._answers[token] = details, future
             emit({'type': 'approval.pending', 'message': 'Waiting for approval', 'approval': details})
             try:
-                decision = await future
+                try:
+                    decision = await (asyncio.wait_for(future, self.approval_timeout) if self.approval_timeout else future)
+                except TimeoutError:
+                    # Nobody is watching: decline so Codex continues (or reports) instead of hanging.
+                    decision = 'decline'
+                    emit({'type': 'approval.timeout', 'approval_id': token,
+                          'message': f'No answer within {self.approval_timeout}s; declined automatically'})
                 if method == 'item/permissions/requestApproval':
                     result = {'permissions': params.get('permissions', {}) if decision == 'accept' else {}, 'scope': 'turn'}
                 else:
@@ -157,7 +197,10 @@ class CodexRunner:
             thread = await request('thread/resume' if session_id else 'thread/start', config)
             session_id = thread['thread']['id']
             emit({'type': 'thread.started', 'thread_id': session_id})
-            await request('turn/start', {'threadId': session_id, 'input': [{'type': 'text', 'text': prompt}]})
+            turn = {'threadId': session_id, 'input': [{'type': 'text', 'text': prompt}]}
+            if output_schema:
+                turn['outputSchema'] = output_schema
+            await request('turn/start', turn)
             remaining = float(self.timeout)
             while not finished.done():
                 started = asyncio.get_running_loop().time()

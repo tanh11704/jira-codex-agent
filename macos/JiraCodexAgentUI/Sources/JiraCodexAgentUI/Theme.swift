@@ -11,6 +11,8 @@ extension Color {
         case "blue": return .blue
         case "green": return .green
         case "red": return .red
+        case "orange": return .orange
+        case "purple": return .purple
         default: return .secondary
         }
     }

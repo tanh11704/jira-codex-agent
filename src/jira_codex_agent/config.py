@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     max_task_seconds: int = Field(default=7200, ge=60)
     dry_run: bool = False
 
+    # Unattended operation: nothing may wait on a human indefinitely.
+    approval_timeout_seconds: int = Field(default=900, ge=0)  # 0 waits forever
+    max_task_attempts: int = Field(default=3, ge=1)
+    retry_backoff_seconds: int = Field(default=600, ge=0)
+    history_retention_days: int = Field(default=30, ge=1)
+    max_events_per_task: int = Field(default=500, ge=50)
+    prevent_sleep: bool = True
+    notifications: bool = True
+
     @field_validator("jira_url")
     @classmethod
     def strip_url(cls, value: str) -> str:

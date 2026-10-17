@@ -12,6 +12,7 @@ from jira_codex_agent.codex.runner import CodexRunner
 from jira_codex_agent.config import Settings
 from jira_codex_agent.git.worktree import WorktreeManager
 from jira_codex_agent.jira.client import JiraClient
+from jira_codex_agent.macos import Notifier, SleepGuard
 from jira_codex_agent.scheduler.orchestrator import Orchestrator
 from jira_codex_agent.storage.database import Database, TaskState
 
@@ -43,7 +44,14 @@ class ControlServer:
                 coding = self.database.list_tasks(TaskState.CODING)
                 response = {"running": True, "paused": self.database.is_paused(), "current": coding[0] if coding else None}
             elif command == "tasks":
-                response = {"tasks": self.database.list_tasks()}
+                # Large per-task blobs are served by task:<key> only.
+                response = {"tasks": [{k: v for k, v in row.items() if k not in ('prompt', 'progress', 'result')}
+                                      for row in self.database.list_tasks()]}
+            elif command.startswith('task:'):
+                task = self.database.get_task(command.split(':', 1)[1])
+                if not task:
+                    raise ValueError('Task not found')
+                response = {'task': task}
             elif command in ('quota', 'quota_cached'):
                 if not self.orchestrator:
                     raise ValueError('Quota reader unavailable')
@@ -84,6 +92,28 @@ class ControlServer:
                 response = {"paused": self.database.is_paused()}
                 if self.orchestrator:
                     self.orchestrator.wake_event.set()
+            elif command.startswith('discard:'):
+                # discard:<key>:<retry|skip|delete>; an optional "note" guides the retry.
+                if not self.orchestrator:
+                    raise ValueError('Discard unavailable')
+                _, key, mode = command.split(':', 2)
+                deleted = await self.orchestrator.discard(key, mode, request.get('note'))
+                response = {'paused': self.database.is_paused(), 'deletedBranches': deleted}
+            elif command.startswith('unskip:'):
+                key = command.split(':', 1)[1]
+                task = self.database.get_task(key)
+                if not task or task['state'] != 'skipped':
+                    raise ValueError('Task is not skipped')
+                self.database.update_task(key, TaskState.QUEUED)
+                if self.orchestrator:
+                    self.orchestrator.wake_event.set()
+                response = {'paused': self.database.is_paused()}
+            elif command.startswith('clear_logs:'):
+                self.database.clear_events(command.split(':', 1)[1])
+                response = {'paused': self.database.is_paused()}
+            elif command == 'prune_history':
+                retention = self.orchestrator.settings.history_retention_days if self.orchestrator else 30
+                response = {'removed': self.database.prune(retention)}
             elif command.startswith('resume_task:'):
                 self.database.request_resume(command.split(':', 1)[1])
                 if self.orchestrator:
@@ -93,16 +123,16 @@ class ControlServer:
                 response = {"tasks": self.database.list_tasks(TaskState.REVIEW)}
             elif command.startswith(('review_done:', 'delete_worktree:')):
                 action, key = command.split(':', 1)
-                task = next((row for row in self.database.list_tasks() if row['issue_key'] == key), None)
+                task = self.database.get_task(key)
                 if not task:
                     raise ValueError('Task not found')
                 if action == 'review_done':
-                    if task['state'] != 'review':
+                    if task['state'] not in ('review', 'needs_human'):
                         raise ValueError('Task is not awaiting review')
                     self.database.update_task(key, TaskState.DONE)
                 else:
-                    if task['state'] not in ('failed', 'done'):
-                        raise ValueError('Only failed or reviewed tasks can be cleaned up')
+                    if task['state'] not in ('failed', 'done', 'needs_human', 'skipped'):
+                        raise ValueError('Only finished tasks can be cleaned up; use discard for others')
                     if not self.orchestrator or not task.get('worktree'):
                         raise ValueError('No worktree to remove')
                     await self.orchestrator.worktrees.remove(key, Path(task['worktree']))
@@ -129,7 +159,7 @@ async def run_daemon(settings: Settings | None = None) -> None:
     except BlockingIOError:
         daemon_lock.close()
         raise RuntimeError('Another daemon already owns this data directory') from None
-    database = Database(settings.database_path)
+    database = Database(settings.database_path, max_events_per_task=settings.max_events_per_task)
     database.initialize()
     database.recover_interrupted()
     control = ControlServer(settings.socket_path, database)
@@ -140,9 +170,12 @@ async def run_daemon(settings: Settings | None = None) -> None:
         database,
         jira,
         CodexRunner(settings.codex_command, settings.codex_model, settings.max_task_seconds,
-                    approvals_reviewer=settings.codex_approvals_reviewer),
+                    approvals_reviewer=settings.codex_approvals_reviewer,
+                    approval_timeout=settings.approval_timeout_seconds),
         QuotaReader(settings.codex_command),
         WorktreeManager(settings.repository, settings.worktree_root, settings.base_branch),
+        notify=Notifier(settings.notifications),
+        sleep_guard=SleepGuard(settings.prevent_sleep),
     )
     control.orchestrator = orchestrator
     try:

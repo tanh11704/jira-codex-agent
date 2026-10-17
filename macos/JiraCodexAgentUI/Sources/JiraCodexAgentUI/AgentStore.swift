@@ -18,6 +18,8 @@ final class AgentStore: ObservableObject {
     @AppStorage("daemonPythonPath") var daemonPythonPath = ""
     private var daemonProcess: Process?
     @Published var taskActionError: String?
+    @Published var pendingDiscard: PendingDiscard?
+    @Published var discardNote = ""
     @Published private(set) var logEvents: [TaskLogEvent] = []
     @Published private(set) var logError: String?
     private var logTaskID: String?
@@ -116,6 +118,25 @@ final class AgentStore: ObservableObject {
         } catch { taskActionError = error.localizedDescription }
     }
 
+    /// mode: "retry" (start over), "skip" (never redo) or "delete" (forget).
+    func discard(_ task: AgentTask, mode: String, note: String = "") async {
+        do {
+            let response = try await client.request("discard:\(task.issueKey):\(mode)", socketPath: expandedSocketPath,
+                                                    as: DiscardResponse.self, extra: ["note": note])
+            if !response.deletedBranches.isEmpty {
+                fetchJiraMessage = "Deleted " + response.deletedBranches.joined(separator: ", ")
+            }
+            if mode == "delete", selectedTaskID == task.id { selectedTaskID = nil }
+            logEvents = []
+            await refresh()
+        } catch { taskActionError = error.localizedDescription }
+    }
+
+    func jiraIssueURL(_ task: AgentTask) -> URL? {
+        let base = jiraURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return base.isEmpty ? nil : URL(string: base + "/browse/" + task.issueKey)
+    }
+
     func resumeTask(_ task: AgentTask) async {
         do {
             _ = try await client.request("resume_task:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
@@ -176,6 +197,11 @@ final class AgentStore: ObservableObject {
     @Published private(set) var availableModels: [CodexModelOption] = []
     @Published private(set) var modelCatalogError: String?
     @Published private(set) var isLoadingModels = false
+    @Published var approvalTimeoutMinutes = 15
+    @Published var maxTaskAttempts = 3
+    @Published var historyRetentionDays = 30
+    @Published var preventSleep = true
+    @Published var notificationsEnabled = true
     @Published var quotaFiveHourThreshold = 30
     @Published var quotaWeeklyThreshold = 30
     @Published private(set) var codexStatus = "Checking…"
@@ -186,6 +212,11 @@ final class AgentStore: ObservableObject {
     private let client = AgentClient()
     private var refreshLoop: Task<Void, Never>?
     private var loginProcess: Process?
+
+    private var launchAgentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.jira-codex-agent.plist")
+    }
 
     private var configURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -210,6 +241,8 @@ final class AgentStore: ObservableObject {
     var currentTask: AgentTask? { tasks.first(where: { $0.state == "coding" }) }
     var reviewCount: Int { tasks.filter { $0.state == "review" }.count }
     var failedCount: Int { tasks.filter { $0.state == "failed" }.count }
+    var needsHumanCount: Int { tasks.filter { $0.state == "needs_human" }.count }
+    var blockedCount: Int { tasks.filter { $0.state == "blocked" }.count }
     var queuedCount: Int { tasks.filter { $0.state == "queued" || $0.state == "resume_pending" }.count }
 
     var filteredTasks: [AgentTask] {
@@ -271,6 +304,20 @@ final class AgentStore: ObservableObject {
         defer { isManagingDaemon = false }
         await refresh()
         if connection == .online { return }
+        // Prefer launchd when installed: it restarts the daemon after crashes and at login.
+        if FileManager.default.fileExists(atPath: launchAgentURL.path) {
+            let kickstart = Process()
+            kickstart.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            kickstart.arguments = ["kickstart", "gui/\(getuid())/com.jira-codex-agent"]
+            if (try? kickstart.run()) != nil {
+                kickstart.waitUntilExit()
+                for _ in 0..<30 {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await refresh()
+                    if connection == .online { return }
+                }
+            }
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: NSString(string: daemonPythonPath).expandingTildeInPath)
         process.currentDirectoryURL = URL(fileURLWithPath: NSString(string: daemonProjectDirectory).expandingTildeInPath)
@@ -340,6 +387,11 @@ final class AgentStore: ObservableObject {
             ("JCA_SOCKET_PATH", socketPath),
             ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
             ("JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(quotaWeeklyThreshold)),
+            ("JCA_APPROVAL_TIMEOUT_SECONDS", String(approvalTimeoutMinutes * 60)),
+            ("JCA_MAX_TASK_ATTEMPTS", String(maxTaskAttempts)),
+            ("JCA_HISTORY_RETENTION_DAYS", String(historyRetentionDays)),
+            ("JCA_PREVENT_SLEEP", preventSleep ? "true" : "false"),
+            ("JCA_NOTIFICATIONS", notificationsEnabled ? "true" : "false"),
         ]
         let contents = values.map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
         do {
@@ -443,6 +495,11 @@ final class AgentStore: ObservableObject {
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
         quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         quotaWeeklyThreshold = min(100, max(0, Int(values["JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
+        approvalTimeoutMinutes = max(0, (Int(values["JCA_APPROVAL_TIMEOUT_SECONDS"] ?? "900") ?? 900) / 60)
+        maxTaskAttempts = max(1, Int(values["JCA_MAX_TASK_ATTEMPTS"] ?? "3") ?? 3)
+        historyRetentionDays = max(1, Int(values["JCA_HISTORY_RETENTION_DAYS"] ?? "30") ?? 30)
+        preventSleep = values["JCA_PREVENT_SLEEP"] != "false"
+        notificationsEnabled = values["JCA_NOTIFICATIONS"] != "false"
     }
 
     private func dotenvQuoted(_ value: String) -> String {

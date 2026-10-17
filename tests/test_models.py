@@ -6,7 +6,7 @@ from jira_codex_agent.jira.models import adf_to_text
 
 def test_adf_to_text_flattens_paragraphs() -> None:
     document = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hello"}]}]}
-    assert adf_to_text(document) == "Hello\n"
+    assert adf_to_text(document) == "Hello"
 
 
 def test_five_hour_window_chooses_nearest_duration() -> None:

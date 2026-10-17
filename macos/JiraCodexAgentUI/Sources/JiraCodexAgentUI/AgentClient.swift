@@ -21,10 +21,11 @@ final class AgentClient: @unchecked Sendable {
     func request<Response: Decodable & Sendable>(
         _ command: String,
         socketPath: String,
-        as type: Response.Type
+        as type: Response.Type,
+        extra: [String: String] = [:]
     ) async throws -> Response {
         try await Task.detached(priority: .userInitiated) {
-            let data = try self.performRequest(command, socketPath: socketPath)
+            let data = try self.performRequest(command, socketPath: socketPath, extra: extra)
             if let serverError = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
                 throw AgentClientError.server(serverError.error)
             }
@@ -36,7 +37,7 @@ final class AgentClient: @unchecked Sendable {
         }.value
     }
 
-    private func performRequest(_ command: String, socketPath: String) throws -> Data {
+    private func performRequest(_ command: String, socketPath: String, extra: [String: String]) throws -> Data {
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw AgentClientError.connectionFailed(String(cString: strerror(errno)))
@@ -66,7 +67,8 @@ final class AgentClient: @unchecked Sendable {
             throw AgentClientError.connectionFailed("Daemon is not running or the socket cannot be reached.")
         }
 
-        let request = try JSONSerialization.data(withJSONObject: ["command": command]) + Data([0x0A])
+        let payload = extra.merging(["command": command]) { _, command in command }
+        let request = try JSONSerialization.data(withJSONObject: payload) + Data([0x0A])
         let sent = request.withUnsafeBytes { bytes in
             Darwin.write(descriptor, bytes.baseAddress, bytes.count)
         }
@@ -75,12 +77,15 @@ final class AgentClient: @unchecked Sendable {
         }
 
         var response = Data()
-        var byte: UInt8 = 0
+        var buffer = [UInt8](repeating: 0, count: 65536)
         while true {
-            let count = Darwin.read(descriptor, &byte, 1)
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
             if count <= 0 { break }
-            if byte == 0x0A { break }
-            response.append(byte)
+            if let newline = buffer[0..<count].firstIndex(of: 0x0A) {
+                response.append(contentsOf: buffer[0..<newline])
+                break
+            }
+            response.append(contentsOf: buffer[0..<count])
         }
         guard !response.isEmpty else { throw AgentClientError.invalidResponse }
         return response

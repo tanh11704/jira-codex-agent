@@ -10,3 +10,5 @@ dist/
 build/
 macos/JiraCodexAgentUI/.build/
 macos/JiraCodexAgentUI/dist/
+.DS_Store
+.build/
