@@ -28,6 +28,8 @@ struct MenuBarView: View {
                 Label("\(store.queuedCount) queued", systemImage: "clock")
                 Spacer()
                 Label("\(store.reviewCount) review", systemImage: "checkmark.circle")
+                Spacer()
+                Label("\(store.needsHumanCount) need you", systemImage: "person.fill.questionmark")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

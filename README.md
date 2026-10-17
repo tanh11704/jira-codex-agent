@@ -51,12 +51,45 @@ In another terminal:
 
 ## launchd
 
-Replace `__PROJECT_DIR__` and `__PYTHON__` in [macos/com.jira-codex-agent.plist](macos/com.jira-codex-agent.plist), then:
+Stop any daemon started from the app, then install the launch agent so the daemon starts at
+login and restarts after a crash:
 
 ```bash
-cp macos/com.jira-codex-agent.plist ~/Library/LaunchAgents/com.jira-codex-agent.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jira-codex-agent.plist
+.venv/bin/jira-codex-agent install-service
 ```
+
+It fills in [macos/com.jira-codex-agent.plist](macos/com.jira-codex-agent.plist) with this
+virtualenv's Python and project directory. Once installed, the app's **Start daemon** button uses launchd.
+
+## Unattended operation
+
+The daemon is designed to work through the queue while nobody is at the Mac:
+
+- **Blocked issues are not started.** An issue with an unfinished "is blocked by" / "depends on" link,
+  a *Flagged* impediment, a status containing "Blocked" or a `blocked` label becomes `blocked`, and
+  returns to the queue on the sync after the blocker is done.
+- **Approvals never hang.** Requests that nobody answers within `JCA_APPROVAL_TIMEOUT_SECONDS`
+  (15 min) are declined; Codex is told it runs unattended and should report instead of looping.
+- **Codex's own verdict counts.** The final message is constrained by a JSON output schema. Only
+  `COMPLETED` goes to *Needs review*; `PARTIAL`, `BLOCKED_*` and `NEEDS_HUMAN_REVIEW` go to *Needs you*.
+- **Failures retry, then stop.** Crashes, disconnects and timeouts resume the same session with
+  back-off up to `JCA_MAX_TASK_ATTEMPTS`, then become `failed`. A waiting retry never blocks other issues.
+- **The Mac stays awake** (`caffeinate -i`) while a task runs or a quota reset is under six hours away.
+  Closing the lid on battery still sleeps it.
+- **Notifications** report tasks that are ready, need you, or failed.
+- **History expires.** Logs of reviewed/skipped tasks and archived queue rows are pruned after
+  `JCA_HISTORY_RETENTION_DAYS`; each task keeps at most `JCA_MAX_EVENTS_PER_TASK` log events.
+
+### Undoing wrong work
+
+| Command | App action | Effect |
+|---|---|---|
+| `retry KEY --note "…"` | Retry from scratch… | Remove worktree, the issue's local branch (including a renamed `feature/KEY-…`), logs and Codex thread; queue again with your note in the prompt |
+| `skip KEY` | Discard and skip… | Same cleanup; never picked up again until `unskip KEY` |
+| `delete KEY` | Delete task… | Same cleanup and forget the task; it returns if it still matches the JQL |
+| `prune-history` | — | Apply the retention window now |
+
+Select a task in the dashboard to see its Jira description, blockers, Codex report and test results.
 
 The daemon logs to the path in `JCA_LOG_PATH`. It polls Jira only after the configured idle interval. While Codex runs it waits on the child process, and it reads quota only after successful work.
 
@@ -97,7 +130,7 @@ the [official app-server protocol](https://learn.chatgpt.com/docs/app-server).
 ## Safety and behavior
 
 - Every Jira issue gets branch `codex/<issue-key>` and its own worktree.
-- Successfully completed Codex sessions become `review`; failures are retained as `failed` with diagnostics.
+- Codex sessions reporting `COMPLETED` become `review`; other reports become `needs_human`; failures retry and are finally retained as `failed` with diagnostics.
 - Quota lookup failure is non-fatal. The quota protocol is versioned with the locally installed Codex CLI, so the agent reports it as unavailable and continues conservatively.
 - Set `JCA_DRY_RUN=true` to inspect queue discovery without creating worktrees or invoking Codex.
 

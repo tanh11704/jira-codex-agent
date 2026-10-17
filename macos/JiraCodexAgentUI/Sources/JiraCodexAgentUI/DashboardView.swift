@@ -13,7 +13,7 @@ struct DashboardView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 920, minHeight: 600)
+        .frame(minWidth: 1180, minHeight: 640)
         .task { store.startRefreshing() }
         .task {
             while !Task.isCancelled {
@@ -28,6 +28,19 @@ struct DashboardView: View {
         .alert("Action failed", isPresented: Binding(get: { store.taskActionError != nil }, set: { if !$0 { store.taskActionError = nil } })) {
             Button("OK") { store.taskActionError = nil }
         } message: { Text(store.taskActionError ?? "") }
+        .alert(store.pendingDiscard?.title ?? "", isPresented: Binding(get: { store.pendingDiscard != nil }, set: { if !$0 { store.pendingDiscard = nil } })) {
+            if store.pendingDiscard?.mode == "retry" {
+                TextField("What should Codex do differently? (optional)", text: $store.discardNote)
+            }
+            Button("Cancel", role: .cancel) { store.pendingDiscard = nil }
+            Button(store.pendingDiscard?.mode == "retry" ? "Discard and retry" : (store.pendingDiscard?.mode == "skip" ? "Discard and skip" : "Delete"), role: .destructive) {
+                guard let pending = store.pendingDiscard else { return }
+                let note = store.discardNote
+                store.pendingDiscard = nil
+                store.discardNote = ""
+                Task { await store.discard(pending.task, mode: pending.mode, note: note) }
+            }
+        } message: { Text(store.pendingDiscard?.message ?? "") }
     }
 
     private var sidebar: some View {
@@ -185,7 +198,9 @@ struct DashboardView: View {
         HStack(spacing: 12) {
             MetricCard(title: "Queued", value: "\(store.queuedCount)", symbol: "clock", color: .orange)
             MetricCard(title: "Active", value: store.currentTask == nil ? "0" : "1", symbol: "hammer.fill", color: .blue)
+            MetricCard(title: "Blocked", value: "\(store.blockedCount)", symbol: "lock.fill", color: .purple)
             MetricCard(title: "Review", value: "\(store.reviewCount)", symbol: "checkmark.circle.fill", color: .green)
+            MetricCard(title: "Needs you", value: "\(store.needsHumanCount)", symbol: "person.fill.questionmark", color: .orange)
             MetricCard(title: "Failed", value: "\(store.failedCount)", symbol: "exclamationmark.triangle.fill", color: .red)
         }
     }
@@ -195,18 +210,19 @@ struct DashboardView: View {
         if store.filteredTasks.isEmpty {
             EmptyState(filter: store.selectedFilter).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(store.filteredTasks, selection: $store.selectedTaskID) { task in
-                TaskRow(task: task)
-                    .tag(task.id)
-                    .contextMenu {
-                        if task.worktree != nil {
-                            Button("Reveal worktree in Finder") { store.revealWorktree(task) }
-                        }
-                    }
+            HStack(alignment: .top, spacing: 16) {
+                List(store.filteredTasks, selection: $store.selectedTaskID) { task in
+                    TaskRow(task: task)
+                        .tag(task.id)
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
+                if let task = store.tasks.first(where: { $0.id == store.selectedTaskID }) {
+                    TaskDetailView(task: task)
+                        .frame(width: 380)
+                }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
         }
     }
 
@@ -228,7 +244,7 @@ struct DashboardView: View {
     }
 
     private var subtitle: String {
-        if !store.approvals.isEmpty { return "Waiting for approval — task execution is paused" }
+        if !store.approvals.isEmpty { return "Waiting for approval — unanswered requests are declined after \(store.approvalTimeoutMinutes) min" }
         if let current = store.currentTask {
             return "Currently working on \(current.issueKey)"
         }
@@ -243,7 +259,6 @@ struct DashboardView: View {
 private struct TaskRow: View {
     @EnvironmentObject private var store: AgentStore
     let task: AgentTask
-    @State private var confirmingDelete = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -256,8 +271,10 @@ private struct TaskRow: View {
                     Text(task.issueKey).font(.system(.body, design: .monospaced).weight(.semibold))
                     Text(task.summary).lineLimit(1)
                 }
-                if let error = task.error, !error.isEmpty {
-                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(1)
+                if task.state == "blocked", let reason = task.blockedReason {
+                    Text(reason).font(.caption).foregroundStyle(.purple).lineLimit(1)
+                } else if let error = task.error, !error.isEmpty {
+                    Text(error).font(.caption).foregroundStyle(task.state == "needs_human" ? .orange : .red).lineLimit(1)
                 } else if let worktree = task.worktree {
                     Text(worktree).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -269,34 +286,9 @@ private struct TaskRow: View {
             } else {
                 TaskStateBadge(task: task)
             }
-            if task.state == "review" {
-                Button("Review done") { Task { await store.taskAction("review_done", task: task) } }
-            }
-            if task.state == "interrupted" || task.state == "failed" {
-                Button("Resume task") { Task { await store.resumeTask(task) } }
-            }
-            if task.worktree != nil {
-                Button { store.copyPath(task) } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.borderless)
-                    .help("Copy worktree path")
-                if task.state == "failed" || task.state == "done" {
-                    Button { confirmingDelete = true } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
-                        .help("Delete worktree")
-                }
-                Button { store.revealWorktree(task) } label: {
-                    Image(systemName: "folder")
-                }
-                .buttonStyle(.borderless)
-                .help("Reveal worktree")
-            }
+            TaskActionsMenu(task: task)
         }
         .padding(.vertical, 7)
-        .alert("Delete worktree for \(task.issueKey)?", isPresented: $confirmingDelete) {
-            Button("Cancel", role: .cancel) { }
-            Button("Delete", role: .destructive) { Task { await store.taskAction("delete_worktree", task: task) } }
-        } message: {
-            Text("All files in \(task.worktree ?? "") will be removed, including uncommitted changes. Commit or back up your work first. The Git branch and task history are kept.")
-        }
+        .contextMenu { TaskActionItems(task: task).environmentObject(store) }
     }
 }

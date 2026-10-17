@@ -19,5 +19,7 @@ def test_log_cursor_isolates_tasks_and_survives_reopen(tmp_path):
 def test_log_message_is_bounded(tmp_path):
     db = Database(tmp_path / 'state.db')
     db.initialize()
-    db.append_event('TM-1', 'stdout', 'x' * 50000)
-    assert len(db.events('TM-1')[0]['message']) == 32000
+    db.append_event('TM-1', 'stdout', 'start' + 'x' * 50000 + 'final error')
+    message = db.events('TM-1')[0]['message']
+    assert len(message) == 8000
+    assert message.startswith('start') and message.endswith('final error')

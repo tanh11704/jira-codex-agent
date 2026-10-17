@@ -78,6 +78,16 @@ struct SettingsView: View {
                     Text("Save and restart the daemon to apply to new or resumed tasks.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section("Unattended operation") {
+                    Stepper(store.approvalTimeoutMinutes == 0 ? "Approval timeout: wait forever" : "Decline unanswered approvals after \(store.approvalTimeoutMinutes) min",
+                            value: $store.approvalTimeoutMinutes, in: 0...240, step: 5)
+                    Stepper("Attempts per task: \(store.maxTaskAttempts)", value: $store.maxTaskAttempts, in: 1...10)
+                    Stepper("Keep finished-task history: \(store.historyRetentionDays) days", value: $store.historyRetentionDays, in: 1...365)
+                    Toggle("Keep the Mac awake while working", isOn: $store.preventSleep)
+                    Toggle("Notify when a task finishes, fails or needs you", isOn: $store.notificationsEnabled)
+                    Text("Failed or timed-out runs retry with back-off and the queue moves on. Issues blocked in Jira wait until their blocker is done. Codex reports that are not COMPLETED go to Needs you. Closing the lid on battery still sleeps the Mac.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Pause when remaining quota reaches") {
                     Stepper("5 hours: \(store.quotaFiveHourThreshold)%", value: $store.quotaFiveHourThreshold, in: 0...100)
                     Stepper("7 days: \(store.quotaWeeklyThreshold)%", value: $store.quotaWeeklyThreshold, in: 0...100)
