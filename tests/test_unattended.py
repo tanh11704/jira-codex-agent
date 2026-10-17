@@ -47,7 +47,31 @@ def test_adf_keeps_lists_code_and_links_readable():
         {'type': 'bulletList', 'content': [{'type': 'listItem', 'content': [{'type': 'paragraph', 'content': [
             {'type': 'text', 'text': 'spec', 'marks': [{'type': 'link', 'attrs': {'href': 'https://x'}}]}]}]}]},
         {'type': 'codeBlock', 'attrs': {'language': 'sql'}, 'content': [{'type': 'text', 'text': 'select 1'}]}]}
-    assert adf_to_text(document) == '## AC\n- [spec](https://x)\n```sql\nselect 1\n```\n'
+    assert adf_to_text(document) == '## AC\n\n- [spec](https://x)\n\n```sql\nselect 1\n```'
+
+
+def text(value, *marks):
+    return {'type': 'text', 'text': value, 'marks': [{'type': mark} for mark in marks]}
+
+
+def test_adf_markdown_keeps_emphasis_structure_and_tables():
+    paragraph = lambda *nodes: {'type': 'paragraph', 'content': list(nodes)}
+    item = lambda *nodes: {'type': 'listItem', 'content': list(nodes)}
+    document = {'type': 'doc', 'content': [
+        paragraph(text('AC1 ', 'strong'), text('— '), text('soạn', 'em'), text(' đề'), {'type': 'hardBreak'}, text('dòng 2')),
+        {'type': 'rule'},
+        {'type': 'bulletList', 'content': [item(paragraph(text('Given ', 'strong'), text('x')),
+                                                {'type': 'orderedList', 'content': [item(paragraph(text('sub')))]})]},
+        {'type': 'taskList', 'content': [{'type': 'taskItem', 'attrs': {'state': 'DONE'}, 'content': [text('done')]}]},
+        {'type': 'panel', 'attrs': {'panelType': 'warning'}, 'content': [paragraph(text('careful'))]},
+        {'type': 'table', 'content': [
+            {'type': 'tableRow', 'content': [{'type': 'tableHeader', 'content': [paragraph(text('A'))]},
+                                             {'type': 'tableHeader', 'content': [paragraph(text('B'))]}]},
+            {'type': 'tableRow', 'content': [{'type': 'tableCell', 'content': [paragraph(text('1|2'))]},
+                                             {'type': 'tableCell', 'content': [paragraph(text('3'))]}]}]}]}
+    assert adf_to_text(document) == (
+        '**AC1** — *soạn* đề\ndòng 2\n\n---\n\n- **Given** x\n  1. sub\n\n- [x] done\n\n> ⚠️ careful\n\n'
+        '| A | B |\n| --- | --- |\n| 1\\|2 | 3 |')
 
 
 def test_sync_blocks_and_unblocks_without_touching_finished_work(tmp_path):

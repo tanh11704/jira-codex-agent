@@ -70,9 +70,16 @@ struct TaskActionItems: View {
     }
 }
 
+private struct ReaderContent: Identifiable {
+    let title: String
+    let markdown: String
+    var id: String { title }
+}
+
 struct TaskDetailView: View {
     @EnvironmentObject private var store: AgentStore
     let task: AgentTask
+    @State private var reader: ReaderContent?
 
     var body: some View {
         ScrollView {
@@ -119,17 +126,26 @@ struct TaskDetailView: View {
                         }
                         if let full = report.report, !full.isEmpty {
                             DisclosureGroup("Full handoff report") {
-                                Text(full).font(.callout).textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                MarkdownView(full, fontSize: 12.5)
+                                    .padding(.top, 6)
                             }
+                            expandButton("Read report") { reader = ReaderContent(title: "Codex report", markdown: full) }
                         }
                     }
                 }
-                section("Description") {
-                    Text(task.description?.isEmpty == false ? task.description! : "No description in Jira.")
-                        .font(.callout)
-                        .foregroundStyle(task.description?.isEmpty == false ? .primary : .secondary)
-                        .textSelection(.enabled)
+                section("Description", accessory: {
+                    if let description = task.description, !description.isEmpty {
+                        expandButton("Expand") { reader = ReaderContent(title: "Description", markdown: description) }
+                    }
+                }) {
+                    if let description = task.description, !description.isEmpty {
+                        MarkdownView(description, fontSize: 13)
+                            .padding(12)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator.opacity(0.4)))
+                    } else {
+                        Text("No description in Jira.").font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 if let worktree = task.worktree {
                     section("Worktree") {
@@ -142,6 +158,17 @@ struct TaskDetailView: View {
         }
         .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
+        .sheet(item: $reader) { content in
+            MarkdownReaderSheet(title: task.summary, subtitle: "\(task.issueKey) · \(content.title)",
+                                markdown: content.markdown, link: store.jiraIssueURL(task))
+        }
+    }
+
+    private func expandButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: "arrow.up.left.and.arrow.down.right").font(.caption)
+        }
+        .buttonStyle(.borderless)
     }
 
     private func callout(_ title: String, _ text: String, symbol: String, color: Color) -> some View {
@@ -155,8 +182,17 @@ struct TaskDetailView: View {
     }
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        section(title, accessory: { EmptyView() }, content: content)
+    }
+
+    private func section<Accessory: View, Content: View>(_ title: String, @ViewBuilder accessory: () -> Accessory,
+                                                          @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+            HStack {
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                Spacer()
+                accessory()
+            }
             content()
         }
     }
