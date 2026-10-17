@@ -8,7 +8,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 USER_CONFIG_PATH = Path("~/.config/jira-codex-agent/config.env").expanduser()
-DEFAULT_TASK_INSTRUCTIONS = "Work autonomously in this repository. Inspect existing conventions first, implement the smallest complete solution, and run relevant tests. Do not push, open a pull request, or change Jira. Leave all changes in the current worktree and finish with a concise summary plus any human-review notes."
+DEFAULT_TASK_INSTRUCTIONS = (Path(__file__).parent / "default_task_prompt.txt").read_text(encoding="utf-8").strip()
 
 
 class Settings(BaseSettings):
