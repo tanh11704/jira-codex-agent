@@ -26,11 +26,20 @@ struct QuotaInfo: Decodable {
     }
 }
 
+struct ClaudeQuotaResponse: Decodable {
+    let snapshot: QuotaInfo?
+    let checkedAt: String?
+    let fiveHourThreshold: Int
+    let weeklyThreshold: Int
+}
+
 struct QuotaResponse: Decodable {
     let snapshot: QuotaInfo?
     let checkedAt: String?
     let fiveHourThreshold: Int
     let weeklyThreshold: Int
+    /// Present only while a Claude pass is enabled.
+    let claude: ClaudeQuotaResponse?
 }
 
 struct CodexApproval: Decodable, Identifiable {
@@ -54,14 +63,87 @@ struct TaskReportTest: Codable, Hashable {
     let result: String
 }
 
+/// A decision Codex could not make on its own.
+struct ReportQuestion: Codable, Hashable {
+    let id: String
+    let question: String
+    let context: String?
+    let options: [String]?
+}
+
+/// An approval request declined because nobody answered in time; it can be allowed for the resumed run.
+struct DeclinedApproval: Codable, Hashable {
+    let kind: String
+    let command: String?
+    let cwd: String?
+    let reason: String?
+
+    var title: String {
+        if let command, !command.isEmpty { return command }
+        if kind.contains("fileChange") { return "File changes outside the workspace" }
+        if kind.contains("permissions") { return "Additional permissions" }
+        return kind
+    }
+}
+
+struct DecisionAnswer: Codable, Hashable {
+    let question: String
+    let answer: String
+}
+
+/// One round of answers a human gave before resuming.
+struct HumanDecision: Codable, Hashable {
+    let answeredAt: String
+    let answers: [DecisionAnswer]
+    let note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case answeredAt = "answered_at"
+        case answers, note
+    }
+}
+
 /// Structured final report Codex returns through the turn output schema.
 struct TaskReport: Codable, Hashable {
     let status: String
     let summary: String?
     let blockers: [String]?
+    let questions: [ReportQuestion]?
     let tests: [TaskReportTest]?
     let branch: String?
     let report: String?
+}
+
+struct ClaudeFinding: Codable, Hashable {
+    let severity: String
+    let location: String
+    let issue: String
+    let fix: String
+}
+
+/// Claude's structured review of Codex's uncommitted changes.
+struct ClaudeReview: Codable, Hashable {
+    let verdict: String
+    let summary: String?
+    let findings: [ClaudeFinding]?
+}
+
+/// Claude tokens accumulated over a task's plan and review passes.
+struct ClaudeUsage: Codable, Hashable {
+    let inputTokens: Int
+    let outputTokens: Int
+    let passes: Int
+
+    var summary: String { (inputTokens + outputTokens).formatted(.number.notation(.compactName)) + " tokens" }
+    var detail: String {
+        "Claude: \(passes) pass\(passes == 1 ? "" : "es") · \(inputTokens.formatted()) input / \(outputTokens.formatted()) output tokens (input includes cached context)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case passes
+    }
 }
 
 struct AgentTask: Codable, Identifiable, Hashable {
@@ -81,8 +163,39 @@ struct AgentTask: Codable, Identifiable, Hashable {
     let nextAttemptAt: String?
     let report: String?
     let retryNote: String?
+    let plan: String?
+    let review: String?
+    let phase: String?
+    let claudeUsage: String?
+    let decisions: String?
+    let declinedApprovals: String?
+    let allowedApprovals: String?
+
+    private func decode<T: Decodable>(_ value: String?, as type: T.Type) -> T? {
+        guard let value, let data = value.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    var parsedDecisions: [HumanDecision] { decode(decisions, as: [HumanDecision].self) ?? [] }
+    var parsedDeclinedApprovals: [DeclinedApproval] { decode(declinedApprovals, as: [DeclinedApproval].self) ?? [] }
+    var parsedAllowedApprovals: [DeclinedApproval] { decode(allowedApprovals, as: [DeclinedApproval].self) ?? [] }
+    /// Waiting on a human answer that can resume the same session.
+    var canAnswer: Bool {
+        guard ["needs_human", "failed", "interrupted"].contains(state) else { return false }
+        return state == "needs_human" || !(parsedReport?.questions ?? []).isEmpty || !parsedDeclinedApprovals.isEmpty
+    }
+
+    var parsedUsage: ClaudeUsage? {
+        guard let claudeUsage, let data = claudeUsage.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ClaudeUsage.self, from: data)
+    }
 
     var id: String { issueKey }
+
+    var parsedReview: ClaudeReview? {
+        guard let review, let data = review.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ClaudeReview.self, from: data)
+    }
 
     var parsedReport: TaskReport? {
         guard let report, let data = report.data(using: .utf8) else { return nil }
@@ -93,7 +206,13 @@ struct AgentTask: Codable, Identifiable, Hashable {
         switch state {
         case "queued": return "Queued"
         case "blocked": return "Blocked"
-        case "coding": return "Coding"
+        case "coding":
+            switch phase {
+            case "planning": return "Planning"
+            case "reviewing": return "Reviewing"
+            case "fixing": return "Fixing review"
+            default: return "Coding"
+            }
         case "review": return "Needs review"
         case "needs_human": return "Needs you"
         case "failed": return "Failed"
@@ -109,7 +228,12 @@ struct AgentTask: Codable, Identifiable, Hashable {
         switch state {
         case "queued": return "clock"
         case "blocked": return "lock.fill"
-        case "coding": return "hammer.fill"
+        case "coding":
+            switch phase {
+            case "planning": return "list.bullet.clipboard"
+            case "reviewing": return "eye"
+            default: return "hammer.fill"
+            }
         case "review": return "checkmark.circle.fill"
         case "needs_human": return "person.fill.questionmark"
         case "failed": return "exclamationmark.triangle.fill"
@@ -138,7 +262,10 @@ struct AgentTask: Codable, Identifiable, Hashable {
         case issueKey = "issue_key"
         case summary, state, worktree
         case sessionId = "session_id"
-        case error, description, priority, attempts, report
+        case error, description, priority, attempts, report, plan, review, phase, decisions
+        case claudeUsage = "claude_usage"
+        case declinedApprovals = "declined_approvals"
+        case allowedApprovals = "allowed_approvals"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case issueType = "issue_type"

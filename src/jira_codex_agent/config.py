@@ -55,7 +55,22 @@ class Settings(BaseSettings):
         return text.strip() or DEFAULT_TASK_INSTRUCTIONS
     codex_approvals_reviewer: Literal['user', 'auto_review'] = 'user'
 
-    @field_validator("codex_model", "codex_reasoning_effort", "codex_service_tier", mode="before")
+    # Optional Claude Code passes around Codex, both read-only: a plan before coding and a review after COMPLETED.
+    claude_command: str = "claude"
+    claude_plan: bool = False
+    claude_review: bool = False
+    claude_model: str | None = None  # alias (opus, sonnet) or full model id; None uses the CLI default
+    claude_effort: str | None = None  # low | medium | high | xhigh | max
+    # Codex fix passes allowed after Claude requests changes; 0 only reports the review.
+    claude_review_rounds: int = Field(default=1, ge=0, le=5)
+    claude_timeout_seconds: int = Field(default=1800, ge=60)
+    # Claude passes are skipped while the subscription's remaining 5-hour / weekly usage is at or below these.
+    claude_quota_remaining_threshold: int = Field(default=30, ge=0, le=100)
+    claude_quota_weekly_remaining_threshold: int = Field(default=30, ge=0, le=100)
+    claude_max_turns: int = Field(default=0, ge=0)  # per pass; 0 means no limit
+
+    @field_validator("codex_model", "codex_reasoning_effort", "codex_service_tier", "claude_model", "claude_effort",
+                     mode="before")
     @classmethod
     def normalize_model(cls, value: str | None) -> str | None:
         return value.strip() or None if value is not None else None

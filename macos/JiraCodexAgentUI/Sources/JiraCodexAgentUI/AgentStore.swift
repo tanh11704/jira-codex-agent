@@ -137,6 +137,23 @@ final class AgentStore: ObservableObject {
         return base.isEmpty ? nil : URL(string: base + "/browse/" + task.issueKey)
     }
 
+    /// Send a human's answers and resume the same Codex session; returns whether the daemon accepted them.
+    func answerTask(_ task: AgentTask, answers: [[String: String]], note: String, allow: [Int]) async -> Bool {
+        let payload: [String: Any] = ["answers": answers, "note": note, "allow": allow]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return false }
+        do {
+            _ = try await client.request("answer:" + task.issueKey, socketPath: expandedSocketPath,
+                                         as: PauseResponse.self, extra: ["answer": json])
+            taskActionError = nil
+            await refresh()
+            return true
+        } catch {
+            taskActionError = error.localizedDescription
+            return false
+        }
+    }
+
     func resumeTask(_ task: AgentTask) async {
         do {
             _ = try await client.request("resume_task:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
@@ -196,6 +213,16 @@ final class AgentStore: ObservableObject {
     """
     @Published var taskPrompt = AgentStore.defaultTaskPrompt
     @Published var codexApprovalsReviewer = "user"
+    @Published var claudePath = "/opt/homebrew/bin/claude"
+    @Published var claudePlan = false
+    @Published var claudeReview = false
+    @Published var claudeModel = ""
+    @Published var claudeEffort = ""
+    @Published var claudeReviewRounds = 1
+    @Published var claudeQuotaFiveHourThreshold = 30
+    @Published var claudeQuotaWeeklyThreshold = 30
+    @Published var claudeMaxTurns = 0
+    @Published private(set) var claudeStatus = "Not checked"
     @Published private(set) var availableModels: [CodexModelOption] = []
     @Published private(set) var modelCatalogError: String?
     @Published private(set) var isLoadingModels = false
@@ -389,6 +416,15 @@ final class AgentStore: ObservableObject {
             ("JCA_CODEX_SERVICE_TIER", codexServiceTier),
             ("JCA_CODEX_PROMPT_BASE64", Data(taskPrompt.utf8).base64EncodedString()),
             ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
+            ("JCA_CLAUDE_COMMAND", claudePath),
+            ("JCA_CLAUDE_PLAN", claudePlan ? "true" : "false"),
+            ("JCA_CLAUDE_REVIEW", claudeReview ? "true" : "false"),
+            ("JCA_CLAUDE_MODEL", claudeModel),
+            ("JCA_CLAUDE_EFFORT", claudeEffort),
+            ("JCA_CLAUDE_REVIEW_ROUNDS", String(claudeReviewRounds)),
+            ("JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD", String(claudeQuotaFiveHourThreshold)),
+            ("JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(claudeQuotaWeeklyThreshold)),
+            ("JCA_CLAUDE_MAX_TURNS", String(claudeMaxTurns)),
             ("JCA_SOCKET_PATH", socketPath),
             ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
             ("JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(quotaWeeklyThreshold)),
@@ -452,6 +488,32 @@ final class AgentStore: ObservableObject {
         }.value
     }
 
+    func checkClaudeLogin() async {
+        let path = claudePath
+        claudeStatus = "Checking…"
+        claudeStatus = await Task.detached {
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = ["auth", "status"]
+            process.standardOutput = pipe
+            process.standardError = pipe
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard process.terminationStatus == 0, status?["loggedIn"] as? Bool == true else {
+                    return "Not signed in — run `claude` in Terminal and use /login"
+                }
+                if let plan = status?["subscriptionType"] as? String { return "Connected · \(plan.capitalized) plan" }
+                return "Connected"
+            } catch {
+                return "Claude CLI not found"
+            }
+        }.value
+    }
+
     func loginCodex() {
         guard loginProcess == nil else { return }
         let process = Process()
@@ -506,6 +568,15 @@ final class AgentStore: ObservableObject {
             taskPrompt = text
         }
         codexApprovalsReviewer = values["JCA_CODEX_APPROVALS_REVIEWER"] == "auto_review" ? "auto_review" : "user"
+        claudePath = values["JCA_CLAUDE_COMMAND"] ?? claudePath
+        claudePlan = values["JCA_CLAUDE_PLAN"] == "true"
+        claudeReview = values["JCA_CLAUDE_REVIEW"] == "true"
+        claudeModel = values["JCA_CLAUDE_MODEL"] ?? claudeModel
+        claudeEffort = values["JCA_CLAUDE_EFFORT"] ?? claudeEffort
+        claudeReviewRounds = min(5, max(0, Int(values["JCA_CLAUDE_REVIEW_ROUNDS"] ?? "1") ?? 1))
+        claudeQuotaFiveHourThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
+        claudeQuotaWeeklyThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
+        claudeMaxTurns = max(0, Int(values["JCA_CLAUDE_MAX_TURNS"] ?? "0") ?? 0)
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
         quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         quotaWeeklyThreshold = min(100, max(0, Int(values["JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))

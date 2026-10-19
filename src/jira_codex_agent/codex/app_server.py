@@ -7,6 +7,11 @@ import uuid
 from .models import CodexRunResult, RunOutcome
 
 
+def approval_matches(details, allowed):
+    """A request a human allowed after it was declined: same kind and, for commands, the same command."""
+    return details.get('kind') == allowed.get('kind') and (details.get('command') or None) == (allowed.get('command') or None)
+
+
 class CodexRunner:
     def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0,
                  reasoning_effort=None, service_tier=None):
@@ -59,7 +64,7 @@ class CodexRunner:
                     process.kill()
                     await process.wait()
 
-    async def run(self, prompt, cwd, *, session_id=None, on_event=None, output_schema=None):
+    async def run(self, prompt, cwd, *, session_id=None, on_event=None, output_schema=None, preapproved=None):
         process = await asyncio.create_subprocess_exec(
             self.command, 'app-server', '--listen', 'stdio://',
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -111,6 +116,16 @@ class CodexRunner:
             if params.get('networkApprovalContext'):
                 network = params['networkApprovalContext']
                 details['command'] = 'Network access: ' + network.get('protocol', '') + '://' + network.get('host', '')
+
+            def answer(decision):
+                if method == 'item/permissions/requestApproval':
+                    return {'permissions': params.get('permissions', {}) if decision == 'accept' else {}, 'scope': 'turn'}
+                return {'decision': decision}
+
+            if any(approval_matches(details, allowed) for allowed in preapproved or []):
+                await send({'id': message['id'], 'result': answer('accept')})
+                emit({'type': 'approval.preapproved', 'message': 'Allowed earlier by a human: ' + (details['command'] or method)})
+                return
             future = asyncio.get_running_loop().create_future()
             self.approvals[token], self._answers[token] = details, future
             emit({'type': 'approval.pending', 'message': 'Waiting for approval', 'approval': details})
@@ -120,13 +135,9 @@ class CodexRunner:
                 except TimeoutError:
                     # Nobody is watching: decline so Codex continues (or reports) instead of hanging.
                     decision = 'decline'
-                    emit({'type': 'approval.timeout', 'approval_id': token,
+                    emit({'type': 'approval.timeout', 'approval_id': token, 'approval': details,
                           'message': f'No answer within {self.approval_timeout}s; declined automatically'})
-                if method == 'item/permissions/requestApproval':
-                    result = {'permissions': params.get('permissions', {}) if decision == 'accept' else {}, 'scope': 'turn'}
-                else:
-                    result = {'decision': decision}
-                await send({'id': message['id'], 'result': result})
+                await send({'id': message['id'], 'result': answer(decision)})
                 emit({'type': 'approval.answered', 'message': decision, 'approval_id': token})
             finally:
                 self.approvals.pop(token, None)

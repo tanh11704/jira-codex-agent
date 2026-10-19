@@ -93,6 +93,26 @@ Select a task in the dashboard to see its Jira description, blockers, Codex repo
 
 The daemon logs to the path in `JCA_LOG_PATH`. It polls Jira only after the configured idle interval. While Codex runs it waits on the child process, and it reads quota only after successful work.
 
+## Claude plan and review (optional)
+
+Codex has a smaller context window, so an authenticated [Claude Code](https://claude.com/claude-code) CLI can
+do the wide reading around it. Enable either pass in **Settings → Claude** or with `JCA_CLAUDE_PLAN` / `JCA_CLAUDE_REVIEW`:
+
+```text
+Claude plan (read-only) → Codex implements → COMPLETED? → Claude review (read-only)
+                                                 ↑                    │ REQUEST_CHANGES
+                                                 └── Codex fixes ─────┘ up to JCA_CLAUDE_REVIEW_ROUNDS
+```
+
+- Claude runs `claude -p` in the task worktree limited to `Read`, `Grep`, `Glob` and read-only git commands; it never edits files.
+- The plan is added to the Codex prompt and kept for resumed runs.
+- Blocker or major findings go back to the same Codex session. If they remain after the allowed rounds, the task goes to *Needs you*.
+- Before every pass the daemon reads your Claude plan's limits with `claude -p /usage` (no model request). When the
+  remaining 5-hour or weekly share is at or below `JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD` /
+  `JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD`, the pass is skipped so the rest stays for your own Claude work.
+  The dashboard shows Claude's quota next to Codex's.
+- If Claude is missing, low on quota or fails, Codex continues alone and the event appears in the task log.
+
 ## Native macOS UI
 
 The SwiftUI app provides both a menu-bar controller and a full dashboard. It shows the current issue, queue, review and failure counts, task worktrees, and supports pause/resume. It communicates only through the daemon's local Unix socket.

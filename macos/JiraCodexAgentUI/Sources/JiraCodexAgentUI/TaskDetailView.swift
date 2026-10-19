@@ -95,6 +95,9 @@ struct TaskDetailView: View {
                         if let type = task.issueType { Label(type, systemImage: "tag") }
                         if let priority = task.priority { Label(priority, systemImage: "flag") }
                         if let attempts = task.attempts, attempts > 0 { Label("Attempt \(attempts)", systemImage: "arrow.clockwise") }
+                        if let usage = task.parsedUsage {
+                            Label("Claude \(usage.summary)", systemImage: "sparkles").help(usage.detail)
+                        }
                     }
                     .font(.caption).foregroundStyle(.secondary)
                     if let url = store.jiraIssueURL(task) {
@@ -107,6 +110,28 @@ struct TaskDetailView: View {
                 if let error = task.error, !error.isEmpty {
                     callout(task.state == "needs_human" ? "Needs your decision" : "Last error", error,
                             symbol: "exclamationmark.triangle.fill", color: task.state == "needs_human" ? .orange : .red)
+                }
+                if task.canAnswer {
+                    section("Your decision") {
+                        AnswerPanel(task: task).id(task.issueKey)
+                    }
+                }
+                if !task.parsedDecisions.isEmpty || !task.parsedAllowedApprovals.isEmpty {
+                    section("Decisions so far") {
+                        ForEach(Array(task.parsedDecisions.enumerated()), id: \.offset) { _, decision in
+                            ForEach(decision.answers, id: \.self) { item in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.question).font(.caption).foregroundStyle(.secondary)
+                                    Text(item.answer).font(.callout)
+                                }
+                            }
+                            if let note = decision.note { Label(note, systemImage: "text.bubble").font(.callout) }
+                        }
+                        ForEach(task.parsedAllowedApprovals, id: \.self) { approval in
+                            Label(approval.title, systemImage: "checkmark.shield").font(.caption.monospaced())
+                        }
+                    }
+                    .textSelection(.enabled)
                 }
                 if let note = task.retryNote {
                     callout("Note for this attempt", note, symbol: "text.bubble", color: .blue)
@@ -130,6 +155,39 @@ struct TaskDetailView: View {
                                     .padding(.top, 6)
                             }
                             expandButton("Read report") { reader = ReaderContent(title: "Codex report", markdown: full) }
+                        }
+                    }
+                }
+                if let review = task.parsedReview {
+                    section("Claude review") {
+                        let approved = review.verdict == "APPROVE"
+                        Label(approved ? "Approved" : "Changes requested",
+                              systemImage: approved ? "checkmark.seal.fill" : "exclamationmark.bubble.fill")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(approved ? .green : .orange)
+                        if let summary = review.summary, !summary.isEmpty { Text(summary) }
+                        ForEach(review.findings ?? [], id: \.self) { finding in
+                            HStack(alignment: .top) {
+                                Text(finding.severity.uppercased())
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(["blocker", "major"].contains(finding.severity) ? .red : .secondary)
+                                    .frame(width: 56, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(finding.location).font(.caption.monospaced()).foregroundStyle(.secondary)
+                                    Text(finding.issue).font(.callout)
+                                    Text(finding.fix).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+                }
+                if let plan = task.plan, !plan.isEmpty {
+                    section("Claude plan", accessory: {
+                        expandButton("Expand") { reader = ReaderContent(title: "Claude plan", markdown: plan) }
+                    }) {
+                        DisclosureGroup("Implementation plan") {
+                            MarkdownView(plan, fontSize: 12.5).padding(.top, 6)
                         }
                     }
                 }
@@ -194,6 +252,97 @@ struct TaskDetailView: View {
                 accessory()
             }
             content()
+        }
+    }
+}
+
+/// Answers Codex's questions and allows declined requests, then resumes the same session and worktree.
+struct AnswerPanel: View {
+    @EnvironmentObject private var store: AgentStore
+    let task: AgentTask
+    @State private var answers: [String: String] = [:]
+    @State private var note = ""
+    @State private var allowed: Set<Int> = []
+    @State private var isSending = false
+
+    private var questions: [ReportQuestion] { task.parsedReport?.questions ?? [] }
+
+    private var canSend: Bool {
+        answers.values.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            || !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !allowed.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(index + 1). \(question.question)").font(.callout.weight(.semibold))
+                    if let context = question.context, !context.isEmpty {
+                        Text(context).font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(question.options ?? [], id: \.self) { option in
+                        let selected = answers[question.id] == option
+                        Button { answers[question.id] = option } label: {
+                            Label(option, systemImage: selected ? "largecircle.fill.circle" : "circle")
+                                .foregroundStyle(selected ? Color.accentColor : .primary)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    TextField((question.options ?? []).isEmpty ? "Your answer" : "Or write your own answer",
+                              text: binding(for: question.id), axis: .vertical)
+                        .lineLimit(1...4)
+                }
+            }
+            let declined = task.parsedDeclinedApprovals
+            if !declined.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Declined while nobody answered").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(Array(declined.enumerated()), id: \.offset) { index, approval in
+                        Toggle(isOn: Binding(get: { allowed.contains(index) },
+                                             set: { if $0 { allowed.insert(index) } else { allowed.remove(index) } })) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(approval.title).font(.caption.monospaced())
+                                if let reason = approval.reason, !reason.isEmpty {
+                                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                    Text("Checked requests are approved automatically when Codex asks for them again in this task.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            TextField(questions.isEmpty ? "Tell Codex how to continue" : "Additional note (optional)",
+                      text: $note, axis: .vertical)
+                .lineLimit(1...4)
+            HStack {
+                Text("Resumes the same Codex session and worktree.").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(isSending ? "Sending…" : "Answer & resume") { Task { await send() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSend || isSending)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+    }
+
+    private func binding(for id: String) -> Binding<String> {
+        Binding(get: { answers[id] ?? "" }, set: { answers[id] = $0 })
+    }
+
+    private func send() async {
+        isSending = true
+        defer { isSending = false }
+        let payload = questions.compactMap { question -> [String: String]? in
+            guard let answer = answers[question.id], !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ["id": question.id, "question": question.question, "answer": answer]
+        }
+        if await store.answerTask(task, answers: payload, note: note, allow: allowed.sorted()) {
+            answers = [:]
+            note = ""
+            allowed = []
         }
     }
 }

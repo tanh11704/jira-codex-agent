@@ -3,6 +3,7 @@ import SwiftUI
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case jira = "Jira"
     case codex = "Codex"
+    case claude = "Claude"
     case automation = "Automation"
     case prompt = "Prompt"
     case advanced = "Advanced"
@@ -45,6 +46,7 @@ struct SettingsView: View {
             switch selectedTab {
             case .jira: jiraTab
             case .codex: codexTab
+            case .claude: claudeTab
             case .automation: automationTab
             case .prompt: promptTab
             case .advanced: advancedTab
@@ -208,6 +210,65 @@ struct SettingsView: View {
                 Text("Speed")
             }
         }
+    }
+
+    private var claudeTab: some View {
+        let enabled = store.claudePlan || store.claudeReview
+        return Form {
+            Section {
+                Toggle("Plan with Claude before Codex codes", isOn: $store.claudePlan)
+                Toggle("Review Codex's changes with Claude", isOn: $store.claudeReview)
+                Text("Claude Code runs read-only in the task worktree. The plan is added to the Codex prompt. When Codex reports COMPLETED, Claude reviews the diff; blocker or major findings go back to Codex, and if they remain the task moves to Needs you. If Claude is unavailable, Codex continues alone.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("Claude passes")
+            }
+            Section("Review") {
+                Stepper(store.claudeReviewRounds == 0 ? "Codex fix rounds: none (report only)" : "Codex fix rounds: \(store.claudeReviewRounds)",
+                        value: $store.claudeReviewRounds, in: 0...5)
+            }
+            .disabled(!store.claudeReview)
+            Section {
+                Stepper("5 hours: \(store.claudeQuotaFiveHourThreshold)%", value: $store.claudeQuotaFiveHourThreshold, in: 0...100)
+                Stepper("7 days: \(store.claudeQuotaWeeklyThreshold)%", value: $store.claudeQuotaWeeklyThreshold, in: 0...100)
+                Stepper(store.claudeMaxTurns == 0 ? "Turns per pass: no limit" : "Turns per pass: \(store.claudeMaxTurns)",
+                        value: $store.claudeMaxTurns, in: 0...200, step: 10)
+            } header: {
+                Text("Skip Claude when remaining quota reaches")
+            } footer: {
+                Text("Read from your plan's /usage before every pass, so the rest stays for your own Claude work. A skipped pass never stops the queue: Codex codes without the plan, or the task goes to review without Claude's review.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(!enabled)
+            Section("Model") {
+                Picker("Model", selection: $store.claudeModel) {
+                    Text("CLI default").tag("")
+                    Text("Opus").tag("opus")
+                    Text("Sonnet").tag("sonnet")
+                    Text("Fable").tag("fable")
+                    if !["", "opus", "sonnet", "fable"].contains(store.claudeModel) {
+                        Text(store.claudeModel).tag(store.claudeModel)
+                    }
+                }
+                Picker("Effort", selection: $store.claudeEffort) {
+                    Text("Default").tag("")
+                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text($0.capitalized).tag($0) }
+                }
+            }
+            .disabled(!enabled)
+            Section("Claude account") {
+                HStack {
+                    Image(systemName: store.claudeStatus.hasPrefix("Connected") ? "checkmark.circle.fill" : "person.crop.circle.badge.exclamationmark")
+                        .foregroundStyle(store.claudeStatus.hasPrefix("Connected") ? .green : .orange)
+                    Text(store.claudeStatus)
+                    Spacer()
+                    Button("Check") { Task { await store.checkClaudeLogin() } }
+                }
+                TextField("Claude executable", text: $store.claudePath)
+            }
+        }
+        .formStyle(.grouped)
+        .task { await store.checkClaudeLogin() }
     }
 
     private var automationTab: some View {

@@ -22,8 +22,8 @@ class ExecRunner:
 
     async def run(self, prompt: str, cwd: Path, *, session_id: str | None = None,
                   on_event: Callable[[dict], None] | None = None,
-                  output_schema: dict | None = None) -> CodexRunResult:
-        # output_schema is only honoured by the app-server runner; exec output is parsed as text.
+                  output_schema: dict | None = None, preapproved: list[dict] | None = None) -> CodexRunResult:
+        # output_schema and preapproved are only honoured by the app-server runner; exec output is parsed as text.
         args = [self.command, "exec", "--json", "--sandbox", "workspace-write", "--cd", str(cwd)]
         if self.model:
             args.extend(["--model", self.model])

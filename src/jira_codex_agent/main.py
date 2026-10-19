@@ -7,6 +7,8 @@ import fcntl
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from jira_codex_agent.claude.quota import ClaudeQuotaReader
+from jira_codex_agent.claude.runner import ClaudeRunner
 from jira_codex_agent.codex.quota import QuotaReader
 from jira_codex_agent.codex.runner import CodexRunner
 from jira_codex_agent.config import Settings
@@ -61,10 +63,19 @@ class ControlServer:
                     self.orchestrator.wake_event.set()
                 else:
                     snapshot = quota.cached
+                settings = self.orchestrator.settings
                 response = {'snapshot': snapshot.model_dump(mode='json') if snapshot else None,
                             'checkedAt': quota.checked_at.isoformat() if quota.checked_at else None,
-                            'fiveHourThreshold': self.orchestrator.settings.quota_remaining_threshold,
-                            'weeklyThreshold': self.orchestrator.settings.quota_weekly_remaining_threshold}
+                            'fiveHourThreshold': settings.quota_remaining_threshold,
+                            'weeklyThreshold': settings.quota_weekly_remaining_threshold}
+                if claude_quota := getattr(self.orchestrator, 'claude_quota', None):
+                    # The daemon only reads Claude usage before a pass, so fill an empty cache once for the UI.
+                    claude = await claude_quota.read(force=command == 'quota' or claude_quota.cached is None)
+                    response['claude'] = {
+                        'snapshot': claude.model_dump(mode='json') if claude else None,
+                        'checkedAt': claude_quota.checked_at.isoformat() if claude_quota.checked_at else None,
+                        'fiveHourThreshold': settings.claude_quota_remaining_threshold,
+                        'weeklyThreshold': settings.claude_quota_weekly_remaining_threshold}
             elif command == 'approvals':
                 runner = self.orchestrator.runner if self.orchestrator else None
                 response = {'approvals': list(runner.approvals.values()) if runner else []}
@@ -114,6 +125,14 @@ class ControlServer:
             elif command == 'prune_history':
                 retention = self.orchestrator.settings.history_retention_days if self.orchestrator else 30
                 response = {'removed': self.database.prune(retention)}
+            elif command.startswith('answer:'):
+                # answer:<key>; "answer" holds JSON {answers: [{id, question, answer}], note, allow: [index]}.
+                if not self.orchestrator:
+                    raise ValueError('Answering unavailable')
+                payload = json.loads(request.get('answer') or '{}')
+                self.orchestrator.answer(command.split(':', 1)[1], payload.get('answers') or [], payload.get('note'),
+                                         [int(index) for index in payload.get('allow') or []])
+                response = {'accepted': True, 'paused': self.database.is_paused()}
             elif command.startswith('resume_task:'):
                 self.database.request_resume(command.split(':', 1)[1])
                 if self.orchestrator:
@@ -178,6 +197,11 @@ async def run_daemon(settings: Settings | None = None) -> None:
         WorktreeManager(settings.repository, settings.worktree_root, settings.base_branch),
         notify=Notifier(settings.notifications),
         sleep_guard=SleepGuard(settings.prevent_sleep),
+        claude=ClaudeRunner(settings.claude_command, settings.claude_model, settings.claude_effort,
+                            settings.claude_timeout_seconds, settings.claude_max_turns)
+        if settings.claude_plan or settings.claude_review else None,
+        claude_quota=ClaudeQuotaReader(settings.claude_command, cwd=settings.data_dir)
+        if settings.claude_plan or settings.claude_review else None,
     )
     control.orchestrator = orchestrator
     try:
