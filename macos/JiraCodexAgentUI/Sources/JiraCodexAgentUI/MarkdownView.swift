@@ -371,27 +371,76 @@ private struct CodeBlockView: View {
 }
 
 /// Large reading window for a long description or report.
-struct MarkdownReaderSheet: View {
-    @Environment(\.dismiss) private var dismiss
+/// Which long text of a task a reader window shows; the window looks the task up so its content stays live.
+struct ReaderRequest: Codable, Hashable {
+    enum Section: String, Codable { case description, plan, report }
+    let taskID: String
+    let section: Section
+
+    var title: String {
+        switch section {
+        case .description: return "Description"
+        case .plan: return "Claude plan"
+        case .report: return "Codex report"
+        }
+    }
+
+    func markdown(of task: AgentTask) -> String? {
+        switch section {
+        case .description: return task.description
+        case .plan: return task.plan
+        case .report: return task.parsedReport?.report
+        }
+    }
+}
+
+/// A resizable window reading one task's description, plan or report.
+struct ReaderWindow: View {
+    @EnvironmentObject private var store: AgentStore
+    let request: ReaderRequest?
+
+    var body: some View {
+        if let request, let task = store.tasks.first(where: { $0.id == request.taskID }),
+           let markdown = request.markdown(of: task), !markdown.isEmpty {
+            MarkdownReader(title: task.summary, subtitle: "\(task.issueKey) · \(request.title)",
+                           markdown: markdown, link: store.jiraIssueURL(task))
+                .navigationTitle("\(task.issueKey) · \(request.title)")
+        } else {
+            Text("This content is no longer available.")
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 480, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
+        }
+    }
+}
+
+struct MarkdownReader: View {
     let title: String
     let subtitle: String
     let markdown: String
     let link: URL?
-    @State private var fontSize: CGFloat = 14
+    @AppStorage("readerFontSize") private var fontSize: Double = 14
+    @AppStorage("readerFullWidth") private var fullWidth = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(subtitle).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    Text(title).font(.title2.bold()).lineLimit(2)
+                    Text(title).font(.title2.bold()).lineLimit(2).textSelection(.enabled)
                 }
                 Spacer()
                 HStack(spacing: 4) {
                     Button { fontSize = max(11, fontSize - 1) } label: { Image(systemName: "textformat.size.smaller") }
-                        .help("Smaller text")
-                    Button { fontSize = min(22, fontSize + 1) } label: { Image(systemName: "textformat.size.larger") }
-                        .help("Larger text")
+                        .keyboardShortcut("-", modifiers: .command)
+                        .help("Smaller text (⌘-)")
+                    Button { fontSize = min(28, fontSize + 1) } label: { Image(systemName: "textformat.size.larger") }
+                        .keyboardShortcut("=", modifiers: .command)
+                        .help("Larger text (⌘+)")
+                    Button { fullWidth.toggle() } label: {
+                        Image(systemName: fullWidth ? "arrow.right.and.line.vertical.and.arrow.left"
+                                                    : "arrow.left.and.line.vertical.and.arrow.right")
+                    }
+                    .help(fullWidth ? "Comfortable reading width" : "Use full window width")
                     if let link {
                         Button { NSWorkspace.shared.open(link) } label: { Image(systemName: "arrow.up.right.square") }
                             .help("Open in Jira")
@@ -403,21 +452,18 @@ struct MarkdownReaderSheet: View {
                         .help("Copy Markdown")
                 }
                 .buttonStyle(.borderless)
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .padding(.leading, 8)
             }
             .padding(20)
             Divider()
             ScrollView {
                 MarkdownView(markdown, fontSize: fontSize)
-                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: fullWidth ? .infinity : 760 * fontSize / 14, alignment: .leading)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 24)
                     .frame(maxWidth: .infinity)
             }
             .background(Color(nsColor: .textBackgroundColor))
         }
-        .frame(minWidth: 680, idealWidth: 820, minHeight: 520, idealHeight: 720)
+        .frame(minWidth: 480, idealWidth: 860, maxWidth: .infinity, minHeight: 360, idealHeight: 760, maxHeight: .infinity)
     }
 }

@@ -5,6 +5,10 @@ import re
 from pathlib import Path
 
 
+# Codex saves UI screenshots here for Claude's review; they must never be committed.
+EVIDENCE_DIR = "/.ui-evidence/"
+
+
 class GitError(RuntimeError):
     pass
 
@@ -22,6 +26,7 @@ class WorktreeManager:
 
     async def create(self, issue_key: str) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
+        await self._exclude(EVIDENCE_DIR)
         path = self.root / issue_key.lower()
         if path.exists():
             return path
@@ -32,6 +37,14 @@ class WorktreeManager:
         else:
             await self._git("worktree", "add", "-b", branch, str(path), self.base_branch)
         return path
+
+    async def _exclude(self, pattern: str) -> None:
+        """Keep a pattern out of git status in every worktree without touching the tracked .gitignore."""
+        exclude = Path((await self._git("rev-parse", "--path-format=absolute", "--git-common-dir")).strip()) / "info" / "exclude"
+        lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+        if pattern not in lines:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text("\n".join([*lines, pattern]) + "\n", encoding="utf-8")
 
     async def _git(self, *args: str) -> str:
         process = await asyncio.create_subprocess_exec(

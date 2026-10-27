@@ -9,7 +9,7 @@ STATUSES = ("COMPLETED", "PARTIAL", "BLOCKED_BRANCH", "BLOCKED_DEPENDENCY", "NEE
 REPORT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["status", "summary", "blockers", "questions", "tests", "branch", "report"],
+    "required": ["status", "summary", "blockers", "questions", "tests", "screenshots", "branch", "report"],
     "properties": {
         "status": {"type": "string", "enum": list(STATUSES)},
         "summary": {"type": "string", "description": "One or two sentences on the resulting behaviour"},
@@ -26,6 +26,8 @@ REPORT_SCHEMA = {
             "type": "object", "additionalProperties": False, "required": ["command", "result"],
             "properties": {"command": {"type": "string"},
                            "result": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]}}}},
+        "screenshots": {"type": "array", "items": {"type": "string"},
+                        "description": "Worktree-relative PNG paths under .ui-evidence/ of changed screens; empty when no UI changed"},
         "branch": {"type": "string"},
         "report": {"type": "string", "description": "The full human handoff report in Vietnamese"},
     },
@@ -54,9 +56,10 @@ def parse_report(message: str) -> dict | None:
             continue
         if isinstance(data, dict) and data.get("status") in STATUSES:
             data.setdefault("questions", [])  # reports written before questions existed
+            data.setdefault("screenshots", [])
             return data
     match = re.search(r"Status:\s*\**\s*([A-Z_]+)", message)
     if match and match.group(1) in STATUSES:
-        return {"status": match.group(1), "summary": "", "blockers": [], "questions": [], "tests": [], "branch": "",
+        return {"status": match.group(1), "summary": "", "blockers": [], "questions": [], "tests": [], "screenshots": [], "branch": "",
                 "report": message}
     return None

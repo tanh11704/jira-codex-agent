@@ -51,6 +51,7 @@ struct TaskActionItems: View {
         if task.state == "skipped" {
             Button("Unskip") { Task { await store.taskAction("unskip", task: task) } }
         }
+        OpenTaskWindowItem(task: task)
         if let url = store.jiraIssueURL(task) {
             Button("Open in Jira") { NSWorkspace.shared.open(url) }
         }
@@ -70,16 +71,40 @@ struct TaskActionItems: View {
     }
 }
 
-private struct ReaderContent: Identifiable {
-    let title: String
-    let markdown: String
-    var id: String { title }
+private struct OpenTaskWindowItem: View {
+    @Environment(\.openWindow) private var openWindow
+    let task: AgentTask
+
+    var body: some View {
+        Button("Open in new window") { openWindow(id: "task", value: task.id) }
+    }
+}
+
+/// A task's full detail in its own resizable window.
+struct TaskWindow: View {
+    @EnvironmentObject private var store: AgentStore
+    let taskID: String?
+
+    var body: some View {
+        Group {
+            if let task = store.tasks.first(where: { $0.id == taskID }) {
+                TaskDetailView(task: task, showsWindowButton: false)
+                    .padding(12)
+                    .navigationTitle("\(task.issueKey) · \(task.summary)")
+            } else {
+                Text("This task no longer exists.").foregroundStyle(.secondary)
+            }
+        }
+        .frame(minWidth: 480, idealWidth: 860, maxWidth: .infinity, minHeight: 420, idealHeight: 820, maxHeight: .infinity)
+    }
 }
 
 struct TaskDetailView: View {
     @EnvironmentObject private var store: AgentStore
+    @Environment(\.openWindow) private var openWindow
     let task: AgentTask
-    @State private var reader: ReaderContent?
+    /// False inside the task's own window, where opening another copy makes no sense.
+    var showsWindowButton = true
 
     var body: some View {
         ScrollView {
@@ -89,6 +114,13 @@ struct TaskDetailView: View {
                         Text(task.issueKey).font(.headline.monospaced())
                         Spacer()
                         TaskStateBadge(task: task)
+                        if showsWindowButton {
+                            Button { openWindow(id: "task", value: task.id) } label: {
+                                Image(systemName: "macwindow.badge.plus")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Open in a separate, resizable window")
+                        }
                     }
                     Text(task.summary).font(.title3.weight(.semibold)).textSelection(.enabled)
                     HStack(spacing: 10) {
@@ -154,7 +186,7 @@ struct TaskDetailView: View {
                                 MarkdownView(full, fontSize: 12.5)
                                     .padding(.top, 6)
                             }
-                            expandButton("Read report") { reader = ReaderContent(title: "Codex report", markdown: full) }
+                            expandButton("Read report") { openReader(.report) }
                         }
                     }
                 }
@@ -184,7 +216,7 @@ struct TaskDetailView: View {
                 }
                 if let plan = task.plan, !plan.isEmpty {
                     section("Claude plan", accessory: {
-                        expandButton("Expand") { reader = ReaderContent(title: "Claude plan", markdown: plan) }
+                        expandButton("Expand") { openReader(.plan) }
                     }) {
                         DisclosureGroup("Implementation plan") {
                             MarkdownView(plan, fontSize: 12.5).padding(.top, 6)
@@ -193,7 +225,7 @@ struct TaskDetailView: View {
                 }
                 section("Description", accessory: {
                     if let description = task.description, !description.isEmpty {
-                        expandButton("Expand") { reader = ReaderContent(title: "Description", markdown: description) }
+                        expandButton("Expand") { openReader(.description) }
                     }
                 }) {
                     if let description = task.description, !description.isEmpty {
@@ -216,10 +248,10 @@ struct TaskDetailView: View {
         }
         .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
-        .sheet(item: $reader) { content in
-            MarkdownReaderSheet(title: task.summary, subtitle: "\(task.issueKey) · \(content.title)",
-                                markdown: content.markdown, link: store.jiraIssueURL(task))
-        }
+    }
+
+    private func openReader(_ section: ReaderRequest.Section) {
+        openWindow(id: "reader", value: ReaderRequest(taskID: task.id, section: section))
     }
 
     private func expandButton(_ title: String, action: @escaping () -> Void) -> some View {

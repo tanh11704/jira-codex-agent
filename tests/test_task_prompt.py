@@ -33,3 +33,8 @@ def test_default_requires_repository_rules_and_safe_handoff():
     for requirement in ('RULES.md', 'CONTRIBUTING.md', 'feature/TM-142', 'codex/tm-142',
                         'BLOCKED_BRANCH', 'make check', 'UNCOMMITTED', 'Conventional Commit'):
         assert requirement in DEFAULT_TASK_INSTRUCTIONS
+
+
+def test_default_requires_ui_layout_states_and_screenshots():
+    for requirement in ('min-w-0', 'hover', 'focus-visible', 'pending state', '.ui-evidence/', 'screenshots'):
+        assert requirement in DEFAULT_TASK_INSTRUCTIONS

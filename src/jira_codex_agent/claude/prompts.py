@@ -42,7 +42,8 @@ def plan_prompt(task: str, instructions: str) -> str:
     return f"""You are the planning lead for an autonomous Jira implementation. Another coding agent (Codex) with a much smaller context window will implement the issue from your plan in this Git worktree, so do the wide reading it cannot afford.
 
 Explore the repository read-only: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md, README.md), relevant specs, contracts and the nearby code and tests. Do not modify any file.
-Produce a concrete plan: ordered steps naming the exact files, classes and functions to change, the existing patterns to copy (with paths), contract/migration/UI impact, tests to add and the exact commands to verify. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
+Produce a concrete plan: ordered steps naming the exact files, classes and functions to change, the existing patterns to copy (with paths), contract/migration/UI impact, tests to add and the exact commands to verify.
+For UI work, name the shared layout and control primitives to reuse (form grid, inputs, Button with hover/focus/disabled/pending states), how the screen lays out at 360 and 1280 px, and how to run the portal and capture screenshots for the visual check. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
 
 {task}
 
@@ -70,10 +71,18 @@ Follow it unless the code proves a step wrong; then deviate and explain why in t
 
 def review_prompt(task: str, plan: str | None, report: dict) -> str:
     plan_text = f"\nThe agreed implementation plan:\n{plan}\n" if plan else ''
+    screenshots = '\n'.join(f'- {path}' for path in report.get('screenshots') or []) or '- (none)'
     return f"""You are the code reviewer for an autonomous Jira implementation. A coding agent (Codex) left UNCOMMITTED changes in this Git worktree and reported them COMPLETED. Review them before a human does.
 
 Inspect the change read-only: git status --short, git diff HEAD, and read every untracked file it lists. Read surrounding code and project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md) as needed. Do not modify any file.
 Check: acceptance criteria coverage, correctness and edge cases, authorization/tenant/data-safety, contract and migration drift, missing or weakened tests, rule violations, unrelated changes and leftovers. Be specific: give location, the problem and the fix.
+
+When the diff touches UI (components, pages, styles), review it as a user would see it, not only as logic:
+- Open every screenshot listed below with the Read tool and look for overlapping or clipped controls, horizontal overflow, misaligned labels/inputs/buttons, cramped or broken rows, text cut off or wrapping badly, and states that look unfinished. A visible layout defect is a major finding.
+- Read the markup and classes for causes screenshots can miss: fixed widths on controls inside grid/flex cells, grid/flex children holding inputs without min-w-0, field rows that never stack on narrow widths, absolute positioning or negative margins that can collide, and raw elements bypassing shared primitives.
+- Every clickable element needs cursor-pointer plus distinct hover, active and focus-visible states; disabled must look disabled; async actions need a pending state and visible success/error feedback. A main action without hover/pending feedback is a major finding.
+- UI changes with no screenshots and no stated reason are a major finding; when Codex reported the visual check BLOCKED with a reason, note it as minor so the human checks it manually.
+
 Severity: blocker/major must be fixed before human review; minor/nit are suggestions. Verdict is REQUEST_CHANGES only when at least one blocker or major finding exists, otherwise APPROVE. Write findings in English.
 
 {task}
@@ -81,6 +90,8 @@ Severity: blocker/major must be fixed before human review; minor/nit are suggest
 Codex's report:
 Summary: {report.get('summary', '')}
 Tests: {', '.join(f"{t.get('command')} → {t.get('result')}" for t in report.get('tests') or []) or 'none reported'}
+Screenshots (worktree-relative):
+{screenshots}
 {report.get('report', '')}
 """
 
@@ -95,7 +106,7 @@ def fix_prompt(review: dict, contract: str) -> str:
     return f"""A code reviewer examined your uncommitted changes and requested changes.
 {findings_text(review)}
 
-Fix every valid blocker and major finding; apply minor ones when cheap and safe. If you disagree with a finding, leave the code and explain why in the report. Rerun the relevant checks, keep changes uncommitted and follow the same rules as before.
+Fix every valid blocker and major finding; apply minor ones when cheap and safe. If you disagree with a finding, leave the code and explain why in the report. Rerun the relevant checks, recapture the screenshots of any UI you changed, keep changes uncommitted and follow the same rules as before.
 
 {contract}
 """

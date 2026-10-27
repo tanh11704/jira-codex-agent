@@ -164,3 +164,10 @@ async def test_review_that_predates_codex_fix_is_not_kept(tmp_path):
     await orchestrator.process(issue())
     task = db.get_task('TM-1')
     assert len(prompts) == 2 and task['state'] == 'review' and task['review'] is None
+
+
+def test_review_prompt_asks_claude_to_inspect_ui_screenshots():
+    from jira_codex_agent.claude.prompts import review_prompt
+    prompt = review_prompt('Implement TM-1', None, {'summary': 'Done', 'screenshots': ['.ui-evidence/curriculum-360.png']})
+    assert '.ui-evidence/curriculum-360.png' in prompt and 'Read tool' in prompt and 'hover' in prompt
+    assert '- (none)' in review_prompt('Implement TM-1', None, {'summary': 'Done'})

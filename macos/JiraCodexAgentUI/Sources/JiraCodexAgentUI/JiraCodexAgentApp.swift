@@ -17,6 +17,16 @@ struct JiraCodexAgentApp: App {
         }
         .defaultSize(width: 1280, height: 760)
 
+        WindowGroup("Task", id: "task", for: String.self) { $taskID in
+            TaskWindow(taskID: taskID).environmentObject(store)
+        }
+        .defaultSize(width: 860, height: 820)
+
+        WindowGroup("Reader", id: "reader", for: ReaderRequest.self) { $request in
+            ReaderWindow(request: request).environmentObject(store)
+        }
+        .defaultSize(width: 860, height: 760)
+
         MenuBarExtra {
             MenuBarView().environmentObject(store)
         } label: {

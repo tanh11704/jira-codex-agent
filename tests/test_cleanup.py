@@ -27,3 +27,15 @@ async def test_cleanup_removes_only_exact_registered_worktree(tmp_path):
     manager._git = AsyncMock(side_effect=[f'worktree {path}\nbranch refs/heads/codex/tm-1\n', ''])
     await manager.remove('TM-1', path)
     manager._git.assert_awaited_with('worktree', 'remove', '--force', str(path))
+
+
+@pytest.mark.asyncio
+async def test_create_excludes_ui_evidence_once(tmp_path):
+    root = tmp_path / 'worktrees'
+    (root / 'tm-1').mkdir(parents=True)
+    common = tmp_path / 'repo' / '.git'
+    manager = WorktreeManager(tmp_path / 'repo', root)
+    manager._git = AsyncMock(return_value=f'{common}\n')
+    await manager.create('TM-1')
+    await manager.create('TM-1')
+    assert (common / 'info' / 'exclude').read_text().splitlines() == ['/.ui-evidence/']

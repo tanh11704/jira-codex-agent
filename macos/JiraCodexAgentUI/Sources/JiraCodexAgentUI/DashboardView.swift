@@ -210,7 +210,8 @@ struct DashboardView: View {
         if store.filteredTasks.isEmpty {
             EmptyState(filter: store.selectedFilter).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            HStack(alignment: .top, spacing: 16) {
+            // Drag the divider to give the detail panel more room.
+            HSplitView {
                 List(store.filteredTasks, selection: $store.selectedTaskID) { task in
                     TaskRow(task: task)
                         .tag(task.id)
@@ -218,9 +219,12 @@ struct DashboardView: View {
                 .listStyle(.inset(alternatesRowBackgrounds: true))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
+                .padding(.trailing, 8)
+                .frame(minWidth: 360, maxWidth: .infinity)
                 if let task = store.tasks.first(where: { $0.id == store.selectedTaskID }) {
                     TaskDetailView(task: task)
-                        .frame(width: 380)
+                        .padding(.leading, 8)
+                        .frame(minWidth: 340, idealWidth: 460, maxWidth: .infinity)
                 }
             }
         }
