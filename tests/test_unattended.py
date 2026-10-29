@@ -270,6 +270,43 @@ async def test_discard_removes_worktree_and_renamed_issue_branch_only(tmp_path):
     assert await manager.discard('TM-1', path) == []
 
 
+def commit(path, message, file=None):
+    if file:
+        (path / file).write_text(message)
+        git(path, 'add', file)
+    git(path, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '--allow-empty', '-m', message)
+
+
+def stale_clone(tmp_path):
+    """A clone whose local develop lags origin/develop by one migration commit."""
+    origin = tmp_path / 'origin'
+    origin.mkdir()
+    git(origin, 'init', '-b', 'develop')
+    commit(origin, 'init')
+    repo = tmp_path / 'repo'
+    git(tmp_path, 'clone', str(origin), str(repo))
+    commit(origin, 'migration 0042', '0042.sql')
+    return origin, repo
+
+
+@pytest.mark.asyncio
+async def test_create_starts_from_fetched_base_not_stale_local(tmp_path):
+    _, repo = stale_clone(tmp_path)
+    manager = WorktreeManager(repo, tmp_path / 'worktrees', 'develop')
+    path = await manager.create('TM-1')
+    assert (path / '0042.sql').exists()
+
+
+@pytest.mark.asyncio
+async def test_create_rebases_existing_branch_onto_fetched_base(tmp_path):
+    _, repo = stale_clone(tmp_path)
+    git(repo, 'branch', 'codex/tm-1')
+    manager = WorktreeManager(repo, tmp_path / 'worktrees', 'develop')
+    path = await manager.create('TM-1')
+    assert (path / '0042.sql').exists()
+    assert not git(path, 'status', '--porcelain').strip()
+
+
 SERVER = '''#!/usr/bin/env python3
 import json, sys
 def send(m):

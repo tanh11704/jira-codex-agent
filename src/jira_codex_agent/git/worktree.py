@@ -28,15 +28,38 @@ class WorktreeManager:
         self.root.mkdir(parents=True, exist_ok=True)
         await self._exclude(EVIDENCE_DIR)
         path = self.root / issue_key.lower()
+        # An existing path is a resumed task: its uncommitted work must not be rebased.
         if path.exists():
             return path
+        base = await self._fresh_base()
         branch = self.branch_for(issue_key)
         branches = await self._git("branch", "--list", branch)
         if branches.strip():
             await self._git("worktree", "add", str(path), branch)
+            await self._rebase(path, base)
         else:
-            await self._git("worktree", "add", "-b", branch, str(path), self.base_branch)
+            await self._git("worktree", "add", "--no-track", "-b", branch, str(path), base)
         return path
+
+    async def _fresh_base(self) -> str:
+        """Fetch the base branch so new work starts from the latest remote commit, not a stale local one."""
+        if "origin" not in (await self._git("remote")).split():
+            return self.base_branch
+        await self._git("fetch", "origin", self.base_branch)
+        return f"origin/{self.base_branch}"
+
+    async def _rebase(self, path: Path, base: str) -> None:
+        process = await asyncio.create_subprocess_exec(
+            "git", "-C", str(path), "rebase", base,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode:
+            abort = await asyncio.create_subprocess_exec(
+                "git", "-C", str(path), "rebase", "--abort",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await abort.wait()
+            raise GitError(f"Rebase onto {base} failed: {stderr.decode(errors='replace').strip()}")
 
     async def _exclude(self, pattern: str) -> None:
         """Keep a pattern out of git status in every worktree without touching the tracked .gitignore."""
