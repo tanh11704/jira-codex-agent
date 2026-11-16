@@ -113,6 +113,50 @@ Claude plan (read-only) → Codex implements → COMPLETED? → Claude review (r
   The dashboard shows Claude's quota next to Codex's.
 - If Claude is missing, low on quota or fails, Codex continues alone and the event appears in the task log.
 
+### Claude Code for frontend issues
+
+With **Settings → Claude → Frontend** or `JCA_CLAUDE_FRONTEND=true`, Claude classifies each issue (as part of the plan, or
+in a short read-only pass when planning is off) and the work is routed by area:
+
+```text
+frontend  → Claude Code implements (write access) → Needs review
+backend   → Codex implements → Claude review / Codex fixes → Needs review
+fullstack → Codex implements the backend → Claude review / Codex fixes → Claude Code builds the UI on top → Needs review
+```
+
+- The coding pass may use `Edit`, `Write` and any shell command (builds, tests, dev server, screenshots) but not
+  history-changing git commands (`commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `switch`, `stash`). Unlike
+  Codex it runs without a sandbox, under your user account.
+- It follows the same task prompt and report contract as Codex, is bounded by `JCA_MAX_TASK_SECONDS` rather than
+  `JCA_CLAUDE_MAX_TURNS`, and its session is resumed after interruptions and human answers.
+- Claude's own frontend work is not reviewed by another agent; a human reviews it.
+- If classification fails or Claude's quota is reserved when the frontend is due, Codex implements it instead.
+
+## Local checks (save agent tokens)
+
+Full builds and test suites flood an agent's context with logs. Set the commands in **Settings → Prompt → Local checks**
+(one per line, stored as `JCA_VERIFY_COMMANDS_BASE64`) and the daemon runs them itself in the worktree after Codex or
+Claude reports COMPLETED:
+
+- Agents are told not to run full builds/suites, only narrow checks (one test file, one type-check) while coding.
+- Commands run in order through your login shell (same PATH as Terminal) and stop at the first failure.
+- A failure goes back to the same agent session as a trimmed excerpt (error lines plus the log tail, about 6 KB at most)
+  for up to `JCA_VERIFY_FIX_ROUNDS` (default 2) rounds; still failing → the report becomes PARTIAL and goes to *Needs you*.
+- Passing commands are added to the report's tests. Checks run before Claude's review, so the review never reads a broken
+  build, and again after every fix.
+- Include setup in the list when a fresh worktree needs it, e.g. `pnpm install --frozen-lockfile`.
+
+## Lively UI and images
+
+The default prompt's **VISUAL DESIGN AND IMAGERY** rules ask for hierarchy, cards, icons and purposeful images instead of
+plain text. Images come from repository assets, from free-licensed web images whose URL the agent actually opened, or
+as a placeholder with a fallback plus an English generation prompt. Every slot is listed in the report's `images`
+(placement, target path, aspect ratio, URL + license or prompt). The task detail shows them with **Copy prompt** and
+**Copy path**, so you generate the image during review and save it at that path; no code change is needed. When a task finishes the daemon checks
+every slot's file in the worktree (whatever source the agent claimed) and the app marks each one **Missing file** or
+**File present**, re-checked live, so a slot flips to present as soon as you save the generated image. Custom prompts
+saved earlier get this section appended automatically.
+
 ## Native macOS UI
 
 The SwiftUI app provides both a menu-bar controller and a full dashboard. It shows the current issue, queue, review and failure counts, task worktrees, and supports pause/resume. It communicates only through the daemon's local Unix socket.

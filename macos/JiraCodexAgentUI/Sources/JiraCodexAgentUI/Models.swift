@@ -110,8 +110,37 @@ struct TaskReport: Codable, Hashable {
     let blockers: [String]?
     let questions: [ReportQuestion]?
     let tests: [TaskReportTest]?
+    let images: [ReportImage]?
     let branch: String?
     let report: String?
+}
+
+/// One image slot in the changed UI: an existing asset, a verified web image, or a prompt for the human to generate.
+struct ReportImage: Codable, Hashable {
+    let placement: String
+    let purpose: String?
+    let source: String
+    let path: String?
+    let aspectRatio: String?
+    let url: String?
+    let license: String?
+    let prompt: String?
+    /// Set by the daemon when the task finished: where the file is (or should be) and whether it was absent.
+    let resolvedPath: String?
+    let missing: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case placement, purpose, source, path, url, license, prompt, missing
+        case aspectRatio = "aspect_ratio"
+        case resolvedPath = "resolved_path"
+    }
+
+    /// Checked live so a generated image saved during review flips the slot to present without rerunning the task.
+    /// nil for reports written before the daemon checked files.
+    var fileExists: Bool? {
+        guard let resolvedPath, !resolvedPath.isEmpty else { return missing.map { !$0 } }
+        return FileManager.default.fileExists(atPath: resolvedPath)
+    }
 }
 
 struct ClaudeFinding: Codable, Hashable {
@@ -211,6 +240,8 @@ struct AgentTask: Codable, Identifiable, Hashable {
             case "planning": return "Planning"
             case "reviewing": return "Reviewing"
             case "fixing": return "Fixing review"
+            case "frontend": return "Claude coding UI"
+            case "verifying": return "Running checks"
             default: return "Coding"
             }
         case "review": return "Needs review"
@@ -232,6 +263,8 @@ struct AgentTask: Codable, Identifiable, Hashable {
             switch phase {
             case "planning": return "list.bullet.clipboard"
             case "reviewing": return "eye"
+            case "frontend": return "paintbrush.pointed.fill"
+            case "verifying": return "checklist"
             default: return "hammer.fill"
             }
         case "review": return "checkmark.circle.fill"

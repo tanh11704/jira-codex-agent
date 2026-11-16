@@ -181,6 +181,19 @@ struct TaskDetailView: View {
                                 Text(test.command).font(.caption.monospaced())
                             }
                         }
+                        let images = report.images ?? []
+                        if !images.isEmpty {
+                            let toGenerate = images.filter { $0.source == "generate" }.count
+                            let missingFiles = images.filter { $0.fileExists == false }.count
+                            Text("Images: \(images.count) slot(s)"
+                                 + (toGenerate > 0 ? ", \(toGenerate) to generate" : "")
+                                 + (missingFiles > 0 ? ", \(missingFiles) missing file(s)" : ""))
+                                .font(.callout.weight(.semibold))
+                                .padding(.top, 4)
+                            ForEach(images, id: \.self) { image in
+                                ReportImageRow(image: image)
+                            }
+                        }
                         if let full = report.report, !full.isEmpty {
                             DisclosureGroup("Full handoff report") {
                                 MarkdownView(full, fontSize: 12.5)
@@ -376,5 +389,71 @@ struct AnswerPanel: View {
             note = ""
             allowed = []
         }
+    }
+}
+
+/// An image slot from the report; prompts and target paths copy with one click for generating during review.
+private struct ReportImageRow: View {
+    let image: ReportImage
+    @State private var copied: String?
+
+    private var symbol: String {
+        switch image.source {
+        case "generate": return "wand.and.stars"
+        case "web": return "globe"
+        default: return "photo"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(image.placement, systemImage: symbol).font(.callout.weight(.medium))
+                if let ratio = image.aspectRatio, !ratio.isEmpty {
+                    Text(ratio).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                if let exists = image.fileExists {
+                    Label(exists ? "File present" : "Missing file",
+                          systemImage: exists ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(exists ? .green : .orange)
+                        .help(exists ? "The image file exists in the worktree." :
+                              "No file at this path yet. Generate it (or download the source) and save it here.")
+                }
+                Spacer(minLength: 8)
+                if let path = image.resolvedPath.flatMap({ $0.isEmpty ? nil : $0 }) ?? image.path, !path.isEmpty {
+                    copyButton("Copy path", path)
+                }
+                if let prompt = image.prompt, !prompt.isEmpty { copyButton("Copy prompt", prompt) }
+            }
+            if let purpose = image.purpose, !purpose.isEmpty {
+                Text(purpose).font(.caption).foregroundStyle(.secondary)
+            }
+            if let path = image.resolvedPath.flatMap({ $0.isEmpty ? nil : $0 }) ?? image.path, !path.isEmpty {
+                Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            if let prompt = image.prompt, !prompt.isEmpty {
+                Text(prompt).font(.caption).padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            }
+            if let url = image.url, !url.isEmpty, let link = URL(string: url) {
+                Link(destination: link) {
+                    Text(url + ((image.license ?? "").isEmpty ? "" : " — \(image.license!)")).font(.caption).lineLimit(1)
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .padding(.vertical, 4)
+    }
+
+    private func copyButton(_ title: String, _ value: String) -> some View {
+        Button(copied == title ? "Copied" : title) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+            copied = title
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
     }
 }

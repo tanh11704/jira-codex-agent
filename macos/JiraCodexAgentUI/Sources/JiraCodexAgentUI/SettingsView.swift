@@ -213,7 +213,7 @@ struct SettingsView: View {
     }
 
     private var claudeTab: some View {
-        let enabled = store.claudePlan || store.claudeReview
+        let enabled = store.claudePlan || store.claudeReview || store.claudeFrontend
         return Form {
             Section {
                 Toggle("Plan with Claude before Codex codes", isOn: $store.claudePlan)
@@ -222,6 +222,14 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } header: {
                 Text("Claude passes")
+            }
+            Section {
+                Toggle("Let Claude Code implement frontend tasks", isOn: $store.claudeFrontend)
+            } header: {
+                Text("Frontend")
+            } footer: {
+                Text("Claude classifies each issue (in the plan, or a short extra pass). Frontend issues are coded by Claude Code with write access and go straight to Needs review. Full-stack issues are split: Codex codes the backend and Claude reviews it, then Claude Code builds the UI on top. Backend issues stay with Codex. If Claude's quota is reserved, Codex codes the frontend.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Review") {
                 Stepper(store.claudeReviewRounds == 0 ? "Codex fix rounds: none (report only)" : "Codex fix rounds: \(store.claudeReviewRounds)",
@@ -320,6 +328,19 @@ struct SettingsView: View {
                 }
             } footer: {
                 Text("Applied to every task; the Jira key, title and description are added automatically. Applies to new and resumed tasks, not a task already running. An empty prompt uses the default.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                TextEditor(text: $store.verifyCommands)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 90)
+                    .accessibilityLabel("Local check commands, one per line")
+                Stepper(store.verifyFixRounds == 0 ? "Fix rounds: none (report only)" : "Fix rounds: \(store.verifyFixRounds)",
+                        value: $store.verifyFixRounds, in: 0...5)
+            } header: {
+                Text("Local checks")
+            } footer: {
+                Text("One shell command per line (e.g. pnpm install --frozen-lockfile, pnpm build, pnpm test), run in order in the task worktree after Codex or Claude reports COMPLETED. Agents are told not to run full builds themselves; on failure only the trimmed error output goes back to them. Lines starting with # are ignored. Leave empty to let agents run checks themselves.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

@@ -199,9 +199,9 @@ async def run_daemon(settings: Settings | None = None) -> None:
         sleep_guard=SleepGuard(settings.prevent_sleep),
         claude=ClaudeRunner(settings.claude_command, settings.claude_model, settings.claude_effort,
                             settings.claude_timeout_seconds, settings.claude_max_turns)
-        if settings.claude_plan or settings.claude_review else None,
+        if settings.claude_plan or settings.claude_review or settings.claude_frontend else None,
         claude_quota=ClaudeQuotaReader(settings.claude_command, cwd=settings.data_dir)
-        if settings.claude_plan or settings.claude_review else None,
+        if settings.claude_plan or settings.claude_review or settings.claude_frontend else None,
     )
     control.orchestrator = orchestrator
     try:

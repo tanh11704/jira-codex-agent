@@ -2,7 +2,7 @@ import base64
 from pathlib import Path
 from types import SimpleNamespace
 
-from jira_codex_agent.config import Settings, DEFAULT_TASK_INSTRUCTIONS
+from jira_codex_agent.config import Settings, DEFAULT_TASK_INSTRUCTIONS, UI_QUALITY_SECTION
 from jira_codex_agent.scheduler.orchestrator import Orchestrator
 
 
@@ -38,3 +38,37 @@ def test_default_requires_repository_rules_and_safe_handoff():
 def test_default_requires_ui_layout_states_and_screenshots():
     for requirement in ('min-w-0', 'hover', 'focus-visible', 'pending state', '.ui-evidence/', 'screenshots'):
         assert requirement in DEFAULT_TASK_INSTRUCTIONS
+
+
+def test_custom_prompt_without_ui_rules_gets_them_appended():
+    old = DEFAULT_TASK_INSTRUCTIONS.replace('\n\n' + UI_QUALITY_SECTION, '')
+    assert 'UI QUALITY AND VISUAL CHECK' not in old
+    settings = Settings.model_construct(codex_prompt_base64=base64.b64encode(old.encode()).decode())
+    assert settings.task_instructions == old + '\n\n' + UI_QUALITY_SECTION
+    assert UI_QUALITY_SECTION.startswith('UI QUALITY AND VISUAL CHECK') and '.ui-evidence/' in UI_QUALITY_SECTION
+    assert 'VERIFY' not in UI_QUALITY_SECTION
+
+
+def test_custom_prompt_with_ui_rules_is_not_duplicated():
+    settings = Settings.model_construct(codex_prompt_base64=base64.b64encode(DEFAULT_TASK_INSTRUCTIONS.encode()).decode())
+    assert settings.task_instructions == DEFAULT_TASK_INSTRUCTIONS
+
+
+def test_swift_saves_default_prompt_as_empty():
+    source = Path('macos/JiraCodexAgentUI/Sources/JiraCodexAgentUI/AgentStore.swift').read_text()
+    assert 'taskPrompt == AgentStore.defaultTaskPrompt ? ""' in source
+
+
+def test_default_asks_for_lively_ui_with_verified_or_generated_images():
+    from jira_codex_agent.config import VISUAL_DESIGN_SECTION
+    for requirement in ('icons', 'never guess or construct image URLs', 'image-generation prompt', 'fallback',
+                        'no text, no logos, no watermarks', '"images"', 'identifiable people'):
+        assert requirement in VISUAL_DESIGN_SECTION
+    assert 'Images: <each image slot' in DEFAULT_TASK_INSTRUCTIONS
+
+
+def test_custom_prompt_missing_visual_rules_gets_them_appended():
+    from jira_codex_agent.config import VISUAL_DESIGN_SECTION
+    custom = 'My rules.\n\n' + UI_QUALITY_SECTION
+    settings = Settings.model_construct(codex_prompt_base64=base64.b64encode(custom.encode()).decode())
+    assert settings.task_instructions == custom + '\n\n' + VISUAL_DESIGN_SECTION

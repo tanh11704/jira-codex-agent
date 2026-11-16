@@ -39,7 +39,10 @@ MIGRATED_COLUMNS = {
     "plan": "TEXT",  # Claude's implementation plan (Markdown) handed to Codex
     "review": "TEXT",  # Claude's structured review of Codex's changes (JSON)
     "claude_usage": "TEXT",  # accumulated Claude tokens and estimated cost for this task (JSON)
-    "phase": "TEXT",  # step within coding: planning, coding, reviewing or fixing
+    "phase": "TEXT",  # step within coding: planning, coding, reviewing, fixing or frontend (Claude codes UI)
+    "area": "TEXT",  # Claude's classification of the issue: frontend, backend or fullstack
+    "claude_session_id": "TEXT",  # Claude Code session that codes the frontend, resumed after interruptions
+    "backend_report": "TEXT",  # Codex's report on the backend half of a full-stack issue (JSON)
     "decisions": "TEXT",  # human answers to Codex's questions, oldest first (JSON list)
     "declined_approvals": "TEXT",  # approvals declined because nobody answered in time (JSON list)
     "allowed_approvals": "TEXT",  # declined approvals a human allowed for later runs (JSON list)
@@ -166,12 +169,13 @@ class Database:
     def update_task(self, issue_key: str, state: TaskState, **fields: object) -> None:
         allowed = {"worktree", "session_id", "result", "error", "progress", "attempts", "next_attempt_at",
                    "report", "retry_note", "prompt", "blocked_reason", "plan", "review",
-                   "claude_usage", "phase", "decisions", "declined_approvals", "allowed_approvals"}
+                   "claude_usage", "phase", "area", "claude_session_id", "backend_report", "decisions", "declined_approvals",
+                   "allowed_approvals"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"Unsupported fields: {sorted(invalid)}")
         values = {key: json.dumps(value) if key in ("result", "report", "review", "claude_usage", "decisions", "declined_approvals",
-                                     "allowed_approvals") and value is not None else value
+                                     "allowed_approvals", "backend_report") and value is not None else value
                   for key, value in fields.items()}
         values.update(state=state.value, updated_at=_now())
         assignments = ", ".join(f"{key} = ?" for key in values)
@@ -239,7 +243,8 @@ class Database:
         with self.connect() as db:
             cursor = db.execute(
                 """UPDATE tasks SET state=?, worktree=NULL, session_id=NULL, result=NULL, error=NULL,
-                   progress=NULL, report=NULL, prompt=NULL, plan=NULL, review=NULL, claude_usage=NULL, phase=NULL, decisions=NULL,
+                   progress=NULL, report=NULL, prompt=NULL, plan=NULL, review=NULL, claude_usage=NULL, phase=NULL, area=NULL,
+                   claude_session_id=NULL, backend_report=NULL, decisions=NULL,
                    declined_approvals=NULL, allowed_approvals=NULL, attempts=0, next_attempt_at=NULL,
                    retry_note=?, updated_at=? WHERE issue_key=?""",
                 (state.value, retry_note, _now(), issue_key))

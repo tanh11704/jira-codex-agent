@@ -4,12 +4,15 @@ import asyncio
 import logging
 import json
 import signal
+import subprocess
 import time
+import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from jira_codex_agent.claude.prompts import (PLAN_SCHEMA, REVIEW_SCHEMA, findings_text, fix_prompt, plan_markdown,
+from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, classify_prompt,
+                                             findings_text, fix_prompt, frontend_scope, merge_reports, plan_markdown,
                                              plan_prompt, plan_section, review_prompt)
 from jira_codex_agent.claude.quota import ClaudeQuotaReader
 from jira_codex_agent.claude.runner import ClaudeResult, ClaudeRunner
@@ -23,6 +26,7 @@ from jira_codex_agent.jira.client import JiraClient
 from jira_codex_agent.jira.models import JiraIssue, adf_to_text
 from jira_codex_agent.macos import SleepGuard
 from jira_codex_agent.storage.database import Database, TaskState
+from jira_codex_agent.verify.checks import check_fix_prompt, checks_section, failure_feedback, run_checks
 
 log = logging.getLogger(__name__)
 
@@ -189,14 +193,40 @@ class Orchestrator:
             resume, session_id = None, None
         worktree = Path(resume['worktree']) if resume else await self.worktrees.create(issue.key)
         self.database.update_task(issue.key, TaskState.CODING, worktree=str(worktree), error=None, next_attempt_at=None)
-        # A resumed run keeps the plan it started with; worktree changes would skew a new one.
+        # A resumed run keeps the plan and routing it started with; worktree changes would skew new ones.
         plan = task.get('plan') if resume else None
+        area = task.get('area') if resume else None
+        claude_codes_ui = bool(self.claude and self._setting('claude_frontend', False))
         if not resume and self.claude and self._setting('claude_plan', False):
             self.database.update_task(issue.key, TaskState.CODING, phase='planning')
-            finished, plan = await self._guarded(issue.key, self._plan(issue, task, worktree))
+            finished, planned = await self._guarded(issue.key, self._plan(issue, task, worktree))
             if not finished:
                 return
-        prompt = self._prompt(issue, task, plan)
+            plan, area = planned
+        if not resume and claude_codes_ui and area is None:
+            self.database.update_task(issue.key, TaskState.CODING, phase='planning')
+            finished, area = await self._guarded(issue.key, self._classify(issue, task, worktree))
+            if not finished:
+                return
+
+        if claude_codes_ui and (task.get('phase') == 'frontend' if resume else area == 'frontend'):
+            backend = json.loads(task['backend_report']) if resume and task.get('backend_report') else None
+            finished, result = await self._guarded(issue.key, self._code_frontend(
+                issue, task, worktree, plan, backend, resume=bool(resume), codex_session=session_id))
+            if not finished:
+                return
+            if result is not None:
+                self._finish(issue.key, result)
+                return
+            if resume:
+                # Resumed frontend work waits for Claude rather than restarting it in a Codex session that never saw it.
+                self._attempt_failed(issue.key, 'Claude Code unavailable to continue the frontend work')
+                return
+            area = None  # Claude cannot code now; Codex implements the whole issue.
+
+        split = claude_codes_ui and area == 'fullstack'
+        scope = BACKEND_SCOPE if split else ''
+        prompt = self._prompt(issue, task, plan, scope)
         if resume:
             prompt = self._resume_preamble(task) + prompt
         self.database.update_task(issue.key, TaskState.CODING, prompt=prompt, phase='coding')
@@ -223,25 +253,81 @@ class Orchestrator:
                 if approval not in declined:
                     self.database.update_task(issue.key, TaskState.CODING, declined_approvals=declined + [approval])
 
-        finished, result = await self._guarded(issue.key, self.runner.run(
-            prompt, worktree, session_id=session_id, on_event=record, output_schema=REPORT_SCHEMA,
-            preapproved=self._json(task, 'allowed_approvals')))
+        codex_fix = self._codex_fixer(task, worktree, record)
+
+        async def code() -> CodexRunResult:
+            first = await self.runner.run(prompt, worktree, session_id=session_id, on_event=record,
+                                          output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
+            return await self._verify(issue.key, worktree, first, codex_fix, 'Codex')
+
+        finished, result = await self._guarded(issue.key, code())
         if not finished:
             return
-        review = None
+        review, review_skipped = None, None
         if self.claude and self._setting('claude_review', False):
-            finished, reviewed = await self._guarded(issue.key, self._review_loop(issue, task, worktree, plan, result, record))
+            finished, reviewed = await self._guarded(issue.key, self._review_loop(issue, task, worktree, plan, result, record,
+                                                                                  scope, codex_fix))
             if not finished:
                 return
-            result, review = reviewed
-        if self._finish(issue.key, result, review) == TaskState.REVIEW:
+            result, review, review_skipped = reviewed
+        backend = parse_report(result.final_message) if split and result.outcome == RunOutcome.SUCCEEDED else None
+        if backend and backend['status'] == 'COMPLETED' and not (review and review.get('verdict') == 'REQUEST_CHANGES'):
+            finished, frontend = await self._guarded(issue.key, self._frontend_after_backend(
+                issue, task, worktree, plan, backend, result, codex_fix))
+            if not finished:
+                return
+            result = frontend
+        if self._finish(issue.key, result, review, review_skipped) == TaskState.REVIEW:
             await self._respect_quota()
+
+    def _codex_fixer(self, task: dict, worktree: Path, record):
+        """A follow-up turn in the same Codex thread, used for check failures and review findings."""
+        async def fix(prompt: str, previous: CodexRunResult) -> CodexRunResult:
+            return await self.runner.run(prompt, worktree, session_id=previous.session_id, on_event=record,
+                                         output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
+        return fix
+
+    def _verify_commands(self) -> list[str]:
+        return list(getattr(self.settings, 'verify_commands', None) or [])
+
+    async def _verify(self, key: str, worktree: Path, result: CodexRunResult, fix, agent: str) -> CodexRunResult:
+        """Run the configured build/test commands ourselves after a COMPLETED report.
+
+        A failure goes back to the agent as a trimmed excerpt for a bounded number of rounds; what still fails
+        downgrades the report to PARTIAL so a human looks at it. Passing checks are added to the report."""
+        commands = self._verify_commands()
+        rounds = self._setting('verify_fix_rounds', 2)
+        timeout = self._setting('verify_timeout_seconds', 1800)
+        for attempt in range(rounds + 1):
+            report = parse_report(result.final_message) if commands and result.outcome == RunOutcome.SUCCEEDED else None
+            if not report or report['status'] != 'COMPLETED':
+                return result
+            self.database.update_task(key, TaskState.CODING, phase='verifying')
+            self.database.append_event(key, 'lifecycle', f'Running {len(commands)} local check(s)')
+            results = await run_checks(commands, worktree, timeout, on_result=lambda item: self.database.append_event(
+                key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} ({item.seconds}s)"
+                + ('' if item.ok else '\n' + item.output)))
+            checked = {item.command: 'PASS' if item.ok else 'FAIL' for item in results}
+            report['tests'] = [test for test in report.get('tests') or [] if test.get('command') not in checked] + [
+                {'command': command, 'result': outcome} for command, outcome in checked.items()]
+            if all(item.ok for item in results):
+                return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
+            failed = results[-1].command
+            if attempt == rounds:
+                self.database.append_event(key, 'lifecycle', f'Local check still failing: {failed}')
+                report.update(status='PARTIAL', blockers=(report.get('blockers') or []) + [f'Local check failed: {failed}'])
+                return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
+            self.database.update_task(key, TaskState.CODING, phase='fixing')
+            self.database.append_event(key, 'lifecycle', f'{agent} fixing failed check {failed} (round {attempt + 1}/{rounds})')
+            feedback = failure_feedback(results, commands[len(results):])
+            result = await fix(check_fix_prompt(feedback, output_contract(self._setting('approval_timeout_seconds', 0))), result)
+        return result
 
     @staticmethod
     def _json(task: dict | None, column: str) -> list:
         return json.loads((task or {}).get(column) or '[]')
 
-    def _resume_preamble(self, task: dict) -> str:
+    def _resume_preamble(self, task: dict, approvals: bool = True) -> str:
         """Tell the resumed Codex session what changed since it stopped."""
         parts = ['Continue the interrupted task in this existing worktree. Inspect and preserve existing changes, '
                  'finish remaining work and run tests.']
@@ -255,7 +341,7 @@ class Orchestrator:
         if report and report.get('status') == 'COMPLETED' and review and review.get('verdict') == 'REQUEST_CHANGES':
             parts.append('A code reviewer still requests changes; fix every valid blocker and major finding.\n'
                          + findings_text(review))
-        if allowed := self._json(task, 'allowed_approvals'):
+        if approvals and (allowed := self._json(task, 'allowed_approvals')):
             parts.append('A human allowed these previously declined requests. Request them again when needed; '
                          'they will be approved:\n' + '\n'.join(f"- {item.get('command') or item.get('kind')}" for item in allowed))
         return '\n'.join(parts) + '\n'
@@ -307,12 +393,14 @@ class Orchestrator:
                 waiter.cancel()
             await asyncio.gather(stopped, aborted, return_exceptions=True)
 
-    async def _ask_claude(self, key: str, prompt: str, worktree: Path, schema: dict) -> ClaudeResult:
+    async def _ask_claude(self, key: str, prompt: str, worktree: Path, schema: dict, *, check_quota: bool = True,
+                          **options) -> ClaudeResult:
         """Run one Claude pass when the subscription has quota to spare and record the tokens it used."""
-        if blocked := await self._claude_quota_blocked():
+        if check_quota and (blocked := await self._claude_quota_blocked()):
             return ClaudeResult(ok=False, error=blocked)
         outcome = await self.claude.run(prompt, worktree, schema=schema,
-                                        on_event=lambda event: self.database.append_event(key, event['type'], event['message']))
+                                        on_event=lambda event: self.database.append_event(key, event['type'], event['message']),
+                                        **options)
         usage = json.loads((self.database.get_task(key) or {}).get('claude_usage') or '{}')
         usage = {'input_tokens': usage.get('input_tokens', 0) + outcome.input_tokens,
                  'output_tokens': usage.get('output_tokens', 0) + outcome.output_tokens,
@@ -340,34 +428,116 @@ class Orchestrator:
                         f"(stop at {threshold}%){reset}")
         return None
 
-    async def _plan(self, issue: JiraIssue, task: dict, worktree: Path) -> str | None:
-        """Ask Claude for an implementation plan; Codex plans on its own when Claude is unavailable."""
+    async def _plan(self, issue: JiraIssue, task: dict, worktree: Path) -> tuple[str | None, str | None]:
+        """Ask Claude for an implementation plan and the issue's area; Codex plans alone when Claude is unavailable."""
         self.database.append_event(issue.key, 'lifecycle', 'Claude planning')
         outcome = await self._ask_claude(issue.key, plan_prompt(self._task_text(issue, task), self.settings.task_instructions),
                                          worktree, PLAN_SCHEMA)
         if not outcome.ok:
             self.database.append_event(issue.key, 'lifecycle', f'Claude plan unavailable; Codex plans alone: {outcome.error}')
+            return None, None
+        plan, area = plan_markdown(outcome.data), outcome.data.get('area')
+        self.database.update_task(issue.key, TaskState.CODING, plan=plan, area=area)
+        self.database.append_event(issue.key, 'lifecycle', f"Claude plan ready ({area or 'area unknown'}): "
+                                   + outcome.data.get('summary', ''))
+        return plan, area
+
+    async def _classify(self, issue: JiraIssue, task: dict, worktree: Path) -> str | None:
+        """Ask Claude whether the issue is frontend, backend or full-stack work; None leaves it all to Codex."""
+        self.database.append_event(issue.key, 'lifecycle', 'Claude classifying the issue')
+        outcome = await self._ask_claude(issue.key, classify_prompt(self._task_text(issue, task)), worktree, CLASSIFY_SCHEMA)
+        if not outcome.ok:
+            self.database.append_event(issue.key, 'lifecycle', f'Could not classify the issue; Codex codes it: {outcome.error}')
             return None
-        plan = plan_markdown(outcome.data)
-        self.database.update_task(issue.key, TaskState.CODING, plan=plan)
-        self.database.append_event(issue.key, 'lifecycle', 'Claude plan ready: ' + outcome.data.get('summary', ''))
-        return plan
+        area = outcome.data.get('area')
+        self.database.update_task(issue.key, TaskState.CODING, area=area)
+        self.database.append_event(issue.key, 'lifecycle', f"Issue classified as {area}: {outcome.data.get('reason', '')}")
+        return area
+
+    async def _code_frontend(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
+                             backend: dict | None, *, resume: bool, codex_session: str | None) -> CodexRunResult | None:
+        """Claude Code implements the UI in the worktree; None when its quota is reserved and it cannot run now.
+
+        The result is shaped like a Codex run so the same finishing rules apply; Codex's thread id is kept."""
+        key = issue.key
+        if blocked := await self._claude_quota_blocked():
+            self.database.append_event(key, 'lifecycle', f'Claude Code cannot code the frontend now: {blocked}')
+            return None
+        previous = task.get('claude_session_id') if resume else None
+        self.database.update_task(key, TaskState.CODING, phase='frontend')
+        self.database.append_event(key, 'lifecycle', 'Claude Code resuming the frontend work' if previous
+                                   else 'Claude Code implementing the frontend')
+        prompt = self._prompt(issue, task, plan, frontend_scope(backend))
+        if resume:
+            prompt = self._resume_preamble(task, approvals=False) + prompt
+        options = dict(write=True, timeout=self._setting('max_task_seconds', 7200))
+
+        async def fresh() -> ClaudeResult:
+            session = str(uuid.uuid4())
+            self.database.update_task(key, TaskState.CODING, claude_session_id=session)
+            return await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False, session_id=session, **options)
+
+        outcome = None
+        if previous:
+            outcome = await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False, resume=previous, **options)
+            if not outcome.ok and not outcome.session_id:
+                # The CLI never got going (e.g. the saved session is gone); start a session that reads the worktree.
+                self.database.append_event(key, 'lifecycle', f'Could not resume the Claude session ({outcome.error}); starting a new one')
+                outcome = None
+        outcome = outcome or await fresh()
+
+        def shaped(claude: ClaudeResult) -> CodexRunResult:
+            if not claude.ok:
+                return CodexRunResult(outcome=RunOutcome.FAILED, session_id=codex_session, error=f'Claude Code: {claude.error}')
+            return CodexRunResult(outcome=RunOutcome.SUCCEEDED, session_id=codex_session,
+                                  final_message=json.dumps(claude.data, ensure_ascii=False))
+
+        async def fix(prompt: str, _previous: CodexRunResult) -> CodexRunResult:
+            session = (self.database.get_task(key) or {}).get('claude_session_id')
+            return shaped(await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False,
+                                                 resume=session, **options))
+
+        result = await self._verify(key, worktree, shaped(outcome), fix, 'Claude Code')
+        report = parse_report(result.final_message) if backend and result.outcome == RunOutcome.SUCCEEDED else None
+        if report:
+            result = result.model_copy(update={'final_message': json.dumps(merge_reports(backend, report), ensure_ascii=False)})
+        return result
+
+    async def _frontend_after_backend(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
+                                      backend: dict, result: CodexRunResult, codex_fix) -> CodexRunResult:
+        """Second half of a full-stack issue: Claude codes the UI, or Codex does when Claude cannot run."""
+        self.database.update_task(issue.key, TaskState.CODING, backend_report=backend, session_id=result.session_id)
+        frontend = await self._code_frontend(issue, task, worktree, plan, backend, resume=False,
+                                             codex_session=result.session_id)
+        if frontend is not None:
+            return frontend
+        self.database.update_task(issue.key, TaskState.CODING, phase='coding')
+        self.database.append_event(issue.key, 'lifecycle', 'Codex implementing the frontend instead')
+        frontend = await codex_fix(
+            'The backend part is done. Now implement the frontend part of the issue in this worktree on top of it, '
+            'following the same rules and plan, recapture screenshots of the changed UI and report on the whole issue.\n\n'
+            + output_contract(self._setting('approval_timeout_seconds', 0)), result)
+        return await self._verify(issue.key, worktree, frontend, codex_fix, 'Codex')
 
     async def _review_loop(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
-                           result: CodexRunResult, record) -> tuple[CodexRunResult, dict | None]:
-        """Claude reviews COMPLETED work; Codex fixes requested changes for a bounded number of rounds."""
-        rounds, review = self._setting('claude_review_rounds', 1), None
+                           result: CodexRunResult, record, scope: str = '',
+                           codex_fix=None) -> tuple[CodexRunResult, dict | None, str | None]:
+        """Claude reviews COMPLETED work; Codex fixes requested changes for a bounded number of rounds.
+
+        Returns the final Codex result, the last review and, when the latest change went unreviewed, why."""
+        rounds, review, skipped = self._setting('claude_review_rounds', 1), None, None
         for attempt in range(rounds + 1):
             report = parse_report(result.final_message) if result.outcome == RunOutcome.SUCCEEDED else None
             if not report or report['status'] != 'COMPLETED':
                 break
             self.database.update_task(issue.key, TaskState.CODING, phase='reviewing')
             self.database.append_event(issue.key, 'lifecycle', 'Claude reviewing changes')
-            outcome = await self._ask_claude(issue.key, review_prompt(self._task_text(issue, task), plan, report),
+            outcome = await self._ask_claude(issue.key, review_prompt(self._task_text(issue, task, scope), plan, report),
                                              worktree, REVIEW_SCHEMA)
             if not outcome.ok:
-                # A missing review must not hold finished work back; the human still reviews it.
+                # Unreviewed work goes to the human queue rather than looking as vetted as reviewed work.
                 self.database.append_event(issue.key, 'lifecycle', f'Claude review unavailable: {outcome.error}')
+                skipped = outcome.error or 'Claude review unavailable'
                 if review is not None:
                     # An earlier review describes code Codex has since changed; keep it only in the log.
                     self.database.update_task(issue.key, TaskState.CODING, review=None)
@@ -380,23 +550,30 @@ class Orchestrator:
                 break
             self.database.update_task(issue.key, TaskState.CODING, phase='fixing')
             self.database.append_event(issue.key, 'lifecycle', f'Codex fixing review findings (round {attempt + 1}/{rounds})')
-            result = await self.runner.run(fix_prompt(review, output_contract(self._setting('approval_timeout_seconds', 0))),
-                                           worktree, session_id=result.session_id, on_event=record,
-                                           output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
-        return result, review
+            codex_fix = codex_fix or self._codex_fixer(task, worktree, record)
+            result = await codex_fix(fix_prompt(review, output_contract(self._setting('approval_timeout_seconds', 0))), result)
+            result = await self._verify(issue.key, worktree, result, codex_fix, 'Codex')
+        return result, review, skipped
 
-    def _finish(self, key: str, result: CodexRunResult, review: dict | None = None) -> TaskState:
+    def _finish(self, key: str, result: CodexRunResult, review: dict | None = None,
+                review_skipped: str | None = None) -> TaskState:
         if result.outcome != RunOutcome.SUCCEEDED:
             self.database.update_task(key, TaskState.CODING, session_id=result.session_id,
                                       result=result.model_dump(mode="json"))
             self._attempt_failed(key, result.error or result.outcome.value)
             return TaskState.INTERRUPTED
         report = parse_report(result.final_message)
+        if report and report.get('images'):
+            report = self._check_images(key, report)
         status = report['status'] if report else None
         if status == 'COMPLETED' and review and review.get('verdict') == 'REQUEST_CHANGES':
             # Codex says done but Claude still sees blocking issues after the allowed fix rounds.
             state = TaskState.NEEDS_HUMAN
             error = 'Claude review requested changes: ' + (review.get('summary') or 'see review findings')
+        elif status == 'COMPLETED' and review_skipped:
+            # Review is enabled but did not run; check the change (and its screenshots) by hand.
+            state = TaskState.NEEDS_HUMAN
+            error = f'Claude review skipped ({review_skipped}); review the change and screenshots manually'
         elif status == 'COMPLETED':
             state, error = TaskState.REVIEW, None
         else:
@@ -415,6 +592,45 @@ class Orchestrator:
         self.notify(f'{key}: ' + ('ready for review' if state == TaskState.REVIEW else 'needs you'),
                     error or summary or 'Codex finished')
         return state
+
+    def _check_images(self, key: str, report: dict) -> dict:
+        """Mark each reported image slot whose file is not in the worktree, whatever source the agent claimed.
+
+        resolved_path is absolute so the UI can re-check it live once the human saves a generated image there."""
+        worktree = (self.database.get_task(key) or {}).get('worktree')
+        if not worktree:
+            return report
+        root = Path(worktree).resolve()
+        files: list[str] | None = None
+        images, missing = [], []
+        for image in report['images']:
+            relative = str(image.get('path') or '').strip().lstrip('/')
+            target = (root / relative).resolve() if relative else None
+            if target is not None and not target.is_relative_to(root):
+                target = None  # never look outside the worktree
+            if target is not None and not target.is_file():
+                # Agents sometimes give the path relative to a portal (public/images/...); match it as a suffix.
+                if files is None:
+                    files = self._worktree_files(root)
+                matches = [name for name in files if name == relative or name.endswith('/' + relative)]
+                if len(matches) == 1:
+                    target = root / matches[0]
+            present = bool(target and target.is_file())
+            images.append({**image, 'resolved_path': str(target) if target else '', 'missing': not present})
+            if not present:
+                missing.append(image.get('placement') or relative or '(no path)')
+        if missing:
+            self.database.append_event(key, 'lifecycle', f'{len(missing)} image file(s) missing: ' + '; '.join(missing))
+        return {**report, 'images': images}
+
+    @staticmethod
+    def _worktree_files(root: Path) -> list[str]:
+        try:
+            output = subprocess.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard'], cwd=root,
+                                    capture_output=True, text=True, timeout=30, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return output.splitlines()
 
     def _attempt_failed(self, key: str, error: str) -> None:
         """Retry transient failures with linear back-off, then give up as failed."""
@@ -493,7 +709,7 @@ class Orchestrator:
                     continue
         return False
 
-    def _task_text(self, issue: JiraIssue, task: dict | None = None) -> str:
+    def _task_text(self, issue: JiraIssue, task: dict | None = None, scope: str = '') -> str:
         description = adf_to_text(issue.fields.description).strip() or "No description supplied."
         context = ''
         links = []
@@ -521,11 +737,12 @@ class Orchestrator:
 
 Description:
 {description}
-{context}"""
+{context}{scope}"""
 
-    def _prompt(self, issue: JiraIssue, task: dict | None = None, plan: str | None = None) -> str:
-        return f"""{self._task_text(issue, task)}{plan_section(plan) if plan else ''}
+    def _prompt(self, issue: JiraIssue, task: dict | None = None, plan: str | None = None, scope: str = '') -> str:
+        checks = checks_section(commands) if (commands := self._verify_commands()) else ''
+        return f"""{self._task_text(issue, task, scope)}{plan_section(plan) if plan else ''}
 {self.settings.task_instructions}
-
+{checks}
 {output_contract(self._setting('approval_timeout_seconds', 0))}
 """

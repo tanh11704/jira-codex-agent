@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+AREAS = ("frontend", "backend", "fullstack")
+AREA_PROPERTY = {"type": "string", "enum": list(AREAS),
+                 "description": "frontend: only UI code (components, pages, styles, client state, calls to existing APIs); "
+                                "backend: no UI change; fullstack: needs both server-side and UI changes"}
+AREA_RULES = """Classify the issue by the code it needs changed:
+- frontend: only UI code (components, pages, styles, client-side state, calls to endpoints that already exist).
+- backend: no UI change (APIs, database, migrations, jobs, services, infrastructure, scripts).
+- fullstack: needs both server-side and UI changes (e.g. a new endpoint plus the screen that uses it)."""
+
 PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "steps", "files", "tests", "risks", "questions"],
+    "required": ["area", "summary", "steps", "files", "tests", "risks", "questions"],
     "properties": {
+        "area": AREA_PROPERTY,
         "summary": {"type": "string", "description": "What the change achieves, in one or two sentences"},
         "steps": {"type": "array", "items": {"type": "string"},
                   "description": "Ordered implementation steps naming concrete files, symbols and patterns to reuse"},
@@ -15,6 +25,13 @@ PLAN_SCHEMA = {
         "questions": {"type": "array", "items": {"type": "string"},
                       "description": "Missing product or security decisions; empty when none"},
     },
+}
+
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["area", "reason"],
+    "properties": {"area": AREA_PROPERTY, "reason": {"type": "string", "description": "One sentence"}},
 }
 
 SEVERITIES = ("blocker", "major", "minor", "nit")
@@ -39,17 +56,57 @@ REVIEW_SCHEMA = {
 
 
 def plan_prompt(task: str, instructions: str) -> str:
-    return f"""You are the planning lead for an autonomous Jira implementation. Another coding agent (Codex) with a much smaller context window will implement the issue from your plan in this Git worktree, so do the wide reading it cannot afford.
+    return f"""You are the planning lead for an autonomous Jira implementation. Another coding agent with a much smaller context window will implement the issue from your plan in this Git worktree, so do the wide reading it cannot afford.
 
 Explore the repository read-only: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md, README.md), relevant specs, contracts and the nearby code and tests. Do not modify any file.
 Produce a concrete plan: ordered steps naming the exact files, classes and functions to change, the existing patterns to copy (with paths), contract/migration/UI impact, tests to add and the exact commands to verify.
-For UI work, name the shared layout and control primitives to reuse (form grid, inputs, Button with hover/focus/disabled/pending states), how the screen lays out at 360 and 1280 px, and how to run the portal and capture screenshots for the visual check. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
+For UI work, name the shared layout and control primitives to reuse (form grid, inputs, Button with hover/focus/disabled/pending states), how the screen lays out at 360 and 1280 px, its visual treatment (header, cards, icons from the portal's icon library, badges, and each image slot with its source, asset path and aspect ratio; existing repository assets first), and how to run the portal and capture screenshots for the visual check. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
+For full-stack issues, order the backend steps before the frontend steps: one agent implements the backend first, another the UI on top of it.
+
+{AREA_RULES}
 
 {task}
 
 Rules the implementer will follow (for context; ignore its output/report format):
 {instructions}
 """
+
+
+def classify_prompt(task: str) -> str:
+    return f"""Decide who should implement this Jira issue. Look at the repository read-only (layout, and the code the issue names) only as much as needed to tell where the change lands. Do not modify any file and do not plan the work.
+
+{AREA_RULES}
+
+{task}
+"""
+
+
+BACKEND_SCOPE = """
+SCOPE: BACKEND ONLY
+This is a full-stack issue. Implement only the server-side part (APIs, data, migrations, jobs, contracts) with its tests. Another agent implements the UI in this same worktree after you finish, so do not change frontend code; make the API it needs complete and documented. Report COMPLETED when the backend part is done and verified.
+"""
+
+
+def frontend_scope(backend: dict | None) -> str:
+    if backend is None:
+        return """
+YOU ARE THE IMPLEMENTER
+You are coding this issue yourself in this Git worktree: edit files directly, run the checks and the visual verification, then report.
+"""
+    tests = ', '.join(f"{t.get('command')} → {t.get('result')}" for t in backend.get('tests') or []) or 'none reported'
+    return f"""
+YOU ARE THE IMPLEMENTER: FRONTEND PART
+This is a full-stack issue. Another agent (Codex) already implemented and verified the backend part; its changes are UNCOMMITTED in this worktree (see git status / git diff HEAD). Implement only the UI on top of them, edit files directly, run the checks and the visual verification, then report. Change backend code only when a defect blocks the UI, and explain it in the report.
+Backend summary: {backend.get('summary', '')}
+Backend tests: {tests}
+"""
+
+
+def merge_reports(backend: dict, frontend: dict) -> dict:
+    """One handoff for a split issue: the frontend outcome decides, the backend notes stay readable."""
+    return {**frontend, 'tests': (backend.get('tests') or []) + (frontend.get('tests') or []),
+            'blockers': (backend.get('blockers') or []) + (frontend.get('blockers') or []),
+            'report': f"## Backend (Codex)\n{backend.get('report', '')}\n\n## Frontend (Claude Code)\n{frontend.get('report', '')}"}
 
 
 def plan_markdown(plan: dict) -> str:
@@ -72,6 +129,8 @@ Follow it unless the code proves a step wrong; then deviate and explain why in t
 def review_prompt(task: str, plan: str | None, report: dict) -> str:
     plan_text = f"\nThe agreed implementation plan:\n{plan}\n" if plan else ''
     screenshots = '\n'.join(f'- {path}' for path in report.get('screenshots') or []) or '- (none)'
+    images = '\n'.join(f"- {item.get('placement')} [{item.get('source')}] {item.get('path')} {item.get('aspect_ratio')}: "
+                       f"{item.get('url') or item.get('prompt')}" for item in report.get('images') or []) or '- (none)'
     return f"""You are the code reviewer for an autonomous Jira implementation. A coding agent (Codex) left UNCOMMITTED changes in this Git worktree and reported them COMPLETED. Review them before a human does.
 
 Inspect the change read-only: git status --short, git diff HEAD, and read every untracked file it lists. Read surrounding code and project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md) as needed. Do not modify any file.
@@ -81,6 +140,7 @@ When the diff touches UI (components, pages, styles), review it as a user would 
 - Open every screenshot listed below with the Read tool and look for overlapping or clipped controls, horizontal overflow, misaligned labels/inputs/buttons, cramped or broken rows, text cut off or wrapping badly, and states that look unfinished. A visible layout defect is a major finding.
 - Read the markup and classes for causes screenshots can miss: fixed widths on controls inside grid/flex cells, grid/flex children holding inputs without min-w-0, field rows that never stack on narrow widths, absolute positioning or negative margins that can collide, and raw elements bypassing shared primitives.
 - Every clickable element needs cursor-pointer plus distinct hover, active and focus-visible states; disabled must look disabled; async actions need a pending state and visible success/error feedback. A main action without hover/pending feedback is a major finding.
+- Imagery and visual richness: a learner- or parent-facing screen that is a plain wall of text or bare form, with no hierarchy, icons or cards, is a minor finding (major when the issue asks for a designed screen). An image URL that looks guessed or unverified, a web image without a license, a photo of an identifiable person, an image without a fixed aspect ratio or missing-file fallback, missing alt text, or an image slot in the code that is not listed in the report is a major finding. Check generation prompts are specific, in English, match the slot's aspect ratio and share one style.
 - UI changes with no screenshots and no stated reason are a major finding; when Codex reported the visual check BLOCKED with a reason, note it as minor so the human checks it manually.
 
 Severity: blocker/major must be fixed before human review; minor/nit are suggestions. Verdict is REQUEST_CHANGES only when at least one blocker or major finding exists, otherwise APPROVE. Write findings in English.
@@ -92,6 +152,8 @@ Summary: {report.get('summary', '')}
 Tests: {', '.join(f"{t.get('command')} → {t.get('result')}" for t in report.get('tests') or []) or 'none reported'}
 Screenshots (worktree-relative):
 {screenshots}
+Image slots:
+{images}
 {report.get('report', '')}
 """
 
