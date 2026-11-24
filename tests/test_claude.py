@@ -299,3 +299,23 @@ async def test_finished_report_marks_image_files_missing_or_present(tmp_path):
     assert images[2]['resolved_path'].endswith('apps/web/public/images/home.webp') and images[3]['resolved_path'] == ''
     assert any('2 image file(s) missing: Hero; Escape' in e['message'] for e in db.events('TM-1'))
     assert len(images) == len(report['images'])
+
+
+@pytest.mark.asyncio
+async def test_finished_report_adds_images_the_change_uses_but_does_not_list(tmp_path):
+    import subprocess
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    (tmp_path / 'web/public/images/home').mkdir(parents=True)
+    (tmp_path / 'web/public/images/home/hero.webp').write_bytes(b'x')
+    (tmp_path / 'web/src').mkdir(parents=True)
+    (tmp_path / 'web/src/Home.tsx').write_text('const a = "/images/home/hero.webp";\nconst b = "/images/home/empty.webp";\n')
+    slot = {'placement': 'Hero', 'purpose': '', 'source': 'repository', 'path': 'web/public/images/home/hero.webp',
+            'aspect_ratio': '16:9', 'url': '', 'license': '', 'prompt': ''}
+    db, orchestrator, _ = setup(tmp_path, [], [json.dumps({**FRONTEND_REPORT, 'images': [slot]})])
+    await orchestrator.process(issue())
+    images = json.loads(db.get_task('TM-1')['report'])['images']
+    assert [(image['placement'], image['source'], image['missing']) for image in images] == [
+        ('Hero', 'repository', False), ('web/src/Home.tsx:2', 'undeclared', True)]
+    assert images[1]['undeclared'] and images[1]['path'] == '/images/home/empty.webp'
+    assert any('1 image(s) used but not listed in the report: /images/home/empty.webp (web/src/Home.tsx:2)' in e['message']
+               for e in db.events('TM-1'))

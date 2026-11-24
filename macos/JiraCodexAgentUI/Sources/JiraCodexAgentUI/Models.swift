@@ -160,9 +160,11 @@ struct ReportImage: Codable, Hashable {
     /// Set by the daemon when the task finished: where the file is (or should be) and whether it was absent.
     let resolvedPath: String?
     let missing: Bool?
+    /// Set by the daemon for an image the change uses that the agent left out of its report.
+    let undeclared: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case placement, purpose, source, path, url, license, prompt, missing
+        case placement, purpose, source, path, url, license, prompt, missing, undeclared
         case aspectRatio = "aspect_ratio"
         case resolvedPath = "resolved_path"
     }

@@ -30,6 +30,7 @@ from jira_codex_agent.macos import SleepGuard
 from jira_codex_agent.storage.database import Database, TaskState
 from jira_codex_agent.verify.checks import (CheckResult, check_fix_prompt, checks_section, failure_feedback,
                                             failure_signature, run_check)
+from jira_codex_agent.verify.images import changed_image_references, is_declared
 
 log = logging.getLogger(__name__)
 
@@ -829,7 +830,7 @@ class Orchestrator:
             self._attempt_failed(key, result.error or result.outcome.value)
             return TaskState.INTERRUPTED
         report = parse_report(result.final_message)
-        if report and report.get('images'):
+        if report:
             report = self._check_images(key, report)
         status = report['status'] if report else None
         if status == 'COMPLETED' and review and review.get('verdict') == 'REQUEST_CHANGES':
@@ -866,7 +867,8 @@ class Orchestrator:
         return state
 
     def _check_images(self, key: str, report: dict) -> dict:
-        """Mark each reported image slot whose file is not in the worktree, whatever source the agent claimed.
+        """Mark each reported image slot whose file is not in the worktree, whatever source the agent claimed,
+        and add a slot for every image the change uses that the report does not list.
 
         resolved_path is absolute so the UI can re-check it live once the human saves a generated image there."""
         worktree = (self.database.get_task(key) or {}).get('worktree')
@@ -874,26 +876,56 @@ class Orchestrator:
             return report
         root = Path(worktree).resolve()
         files: list[str] | None = None
+
+        def resolve(relative: str, near: str = '') -> Path | None:
+            nonlocal files
+            relative = relative.strip().split('?', 1)[0].split('#', 1)[0]
+            candidates = [root / near / relative] if near and relative.startswith('.') else []
+            candidates.append(root / relative.lstrip('/'))
+            for candidate in candidates:
+                target = candidate.resolve()
+                if target.is_relative_to(root) and target.is_file():
+                    return target
+            first = candidates[0].resolve()
+            if not first.is_relative_to(root):
+                return None  # never look outside the worktree
+            # Agents sometimes give the path relative to a portal (public/images/...); match it as a suffix.
+            if files is None:
+                files = self._worktree_files(root)
+            bare = relative.lstrip('/')
+            while bare.startswith(('./', '../')):
+                bare = bare.split('/', 1)[1]
+            matches = [name for name in files if name == bare or name.endswith('/' + bare)]
+            return root / matches[0] if len(matches) == 1 else first
+
         images, missing = [], []
-        for image in report['images']:
-            relative = str(image.get('path') or '').strip().lstrip('/')
-            target = (root / relative).resolve() if relative else None
-            if target is not None and not target.is_relative_to(root):
-                target = None  # never look outside the worktree
-            if target is not None and not target.is_file():
-                # Agents sometimes give the path relative to a portal (public/images/...); match it as a suffix.
-                if files is None:
-                    files = self._worktree_files(root)
-                matches = [name for name in files if name == relative or name.endswith('/' + relative)]
-                if len(matches) == 1:
-                    target = root / matches[0]
+        for image in report.get('images') or []:
+            relative = str(image.get('path') or '').strip()
+            target = resolve(relative) if relative else None
             present = bool(target and target.is_file())
             images.append({**image, 'resolved_path': str(target) if target else '', 'missing': not present})
             if not present:
                 missing.append(image.get('placement') or relative or '(no path)')
+
+        undeclared = []
+        for found in changed_image_references(root):
+            if is_declared(found, images):
+                continue
+            web = found.reference.startswith(('http://', 'https://'))
+            target = None if web else resolve(found.reference, str(Path(found.file).parent))
+            placement = found.file + (f':{found.line}' if found.line else '')
+            images.append({'placement': placement, 'source': 'undeclared', 'path': found.reference,
+                           'purpose': 'Used by the change but not listed in the report; confirm it belongs and supply the file',
+                           'aspect_ratio': '', 'url': found.reference if web else '', 'license': '', 'prompt': '',
+                           'resolved_path': str(target) if target else '', 'missing': not web and not (target and target.is_file()),
+                           'undeclared': True})
+            undeclared.append(f'{found.reference} ({placement})')
         if missing:
             self.database.append_event(key, 'lifecycle', f'{len(missing)} image file(s) missing: ' + '; '.join(missing))
-        return {**report, 'images': images}
+        if undeclared:
+            self.database.append_event(key, 'lifecycle', f'{len(undeclared)} image(s) used but not listed in the report: '
+                                       + '; '.join(undeclared))
+        return {**report, 'images': images} if images else report
 
     @staticmethod
     def _worktree_files(root: Path) -> list[str]:

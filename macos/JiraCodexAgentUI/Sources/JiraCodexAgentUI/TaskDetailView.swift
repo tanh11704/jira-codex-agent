@@ -220,8 +220,10 @@ struct TaskDetailView: View {
                         if !images.isEmpty {
                             let toGenerate = images.filter { $0.source == "generate" }.count
                             let missingFiles = images.filter { $0.fileExists == false }.count
+                            let undeclared = images.filter { $0.undeclared == true }.count
                             Text("Images: \(images.count) slot(s)"
                                  + (toGenerate > 0 ? ", \(toGenerate) to generate" : "")
+                                 + (undeclared > 0 ? ", \(undeclared) not in report" : "")
                                  + (missingFiles > 0 ? ", \(missingFiles) missing file(s)" : ""))
                                 .font(.callout.weight(.semibold))
                                 .padding(.top, 4)
@@ -447,6 +449,7 @@ private struct ReportImageRow: View {
         switch image.source {
         case "generate": return "wand.and.stars"
         case "web": return "globe"
+        case "undeclared": return "questionmark.square.dashed"
         default: return "photo"
         }
     }
@@ -455,6 +458,12 @@ private struct ReportImageRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Label(image.placement, systemImage: symbol).font(.callout.weight(.medium))
+                if image.undeclared == true {
+                    Text("Not in report")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.orange)
+                        .help("The change uses this image but the agent did not list it. Check it belongs, then supply the file.")
+                }
                 if let ratio = image.aspectRatio, !ratio.isEmpty {
                     Text(ratio).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
