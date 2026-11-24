@@ -213,7 +213,7 @@ struct SettingsView: View {
     }
 
     private var claudeTab: some View {
-        let enabled = store.claudePlan || store.claudeReview || store.claudeFrontend
+        let enabled = store.claudePlan || store.claudeReview || store.claudeFrontend || store.claudeDecide
         return Form {
             Section {
                 Toggle("Plan with Claude before Codex codes", isOn: $store.claudePlan)
@@ -229,6 +229,18 @@ struct SettingsView: View {
                 Text("Frontend")
             } footer: {
                 Text("Claude classifies each issue (in the plan, or a short extra pass). Frontend issues are coded by Claude Code with write access and go straight to Needs review. Full-stack issues are split: Codex codes the backend and Claude reviews it, then Claude Code builds the UI on top. Backend issues stay with Codex. If Claude's quota is reserved, Codex codes the frontend.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Let Claude decide open questions as product owner", isOn: $store.claudeDecide)
+                Stepper(store.claudeDecideRounds == 0 ? "Decision rounds after Codex asks: none (plan only)"
+                        : "Decision rounds after Codex asks: \(store.claudeDecideRounds)",
+                        value: $store.claudeDecideRounds, in: 0...5)
+                    .disabled(!store.claudeDecide)
+            } header: {
+                Text("Decisions")
+            } footer: {
+                Text("Instead of waiting for you, Claude answers the plan's open questions before Codex codes, and the questions Codex asks while coding, using the specs and the existing code; Codex then continues in the same session. Every decision, with its reason, confidence and sources, is listed at the end of the report and in the task details so you can check it. If one is wrong, retry the task with a note.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Review") {
@@ -340,7 +352,29 @@ struct SettingsView: View {
             } header: {
                 Text("Local checks")
             } footer: {
-                Text("One shell command per line (e.g. pnpm install --frozen-lockfile, pnpm build, pnpm test), run in order in the task worktree after Codex or Claude reports COMPLETED. Agents are told not to run full builds themselves; on failure only the trimmed error output goes back to them. Lines starting with # are ignored. Leave empty to let agents run checks themselves.")
+                Text("One shell command per line (e.g. pnpm install --frozen-lockfile, pnpm build, pnpm test), run in order in the task worktree after Codex or Claude reports COMPLETED. They run outside the agent sandbox, so Docker and Testcontainers work; a report that is incomplete only because the sandbox blocked checks is verified here and upgraded to COMPLETED when they pass. Agents are told not to run full builds themselves; on failure only the trimmed error output goes back to them. Lines starting with # are ignored. Leave empty to let agents run checks themselves.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Compare failing checks with the base commit", isOn: $store.baselineChecks)
+                TextField("Base worktree setup (optional), e.g. pnpm install --frozen-lockfile", text: $store.baselineSetupCommand)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(!store.baselineChecks)
+            } header: {
+                Text("Pre-existing failures")
+            } footer: {
+                Text("When a check fails, it is rerun once on the base commit in a shared worktree (cached per commit). If the base fails with the same errors, the check is marked PRE-EXISTING and does not block the task; any new error still goes back to the agent.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                TextEditor(text: $store.autoApproveCommands)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 70)
+                    .accessibilityLabel("Commands approved automatically, one pattern per line")
+            } header: {
+                Text("Approve commands automatically")
+            } footer: {
+                Text("One pattern per line, * matches anything (e.g. ./mvnw *, make check, pnpm test*). When Codex asks to run a matching command outside its sandbox, it is approved without waiting for you. A leading cd <dir> && is allowed; commands with ;, |, redirects, & or $( ) never match. Lines starting with # are ignored.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

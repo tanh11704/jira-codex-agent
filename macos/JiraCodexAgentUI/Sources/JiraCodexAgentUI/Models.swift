@@ -89,6 +89,19 @@ struct DeclinedApproval: Codable, Hashable {
 struct DecisionAnswer: Codable, Hashable {
     let question: String
     let answer: String
+    // Set when the agent decided instead of a human.
+    let rationale: String?
+    let confidence: String?
+    let sources: [String]?
+
+    var confidenceLabel: String {
+        switch confidence {
+        case "high": return "High confidence"
+        case "medium": return "Medium confidence"
+        case "low": return "Low confidence"
+        default: return confidence ?? ""
+        }
+    }
 }
 
 /// One round of answers a human gave before resuming.
@@ -96,10 +109,14 @@ struct HumanDecision: Codable, Hashable {
     let answeredAt: String
     let answers: [DecisionAnswer]
     let note: String?
+    let by: String?  // "agent" or "human"; older rows are human
+    let stage: String?  // plan | report | manual, for agent decisions
+
+    var isAgent: Bool { by == "agent" }
 
     enum CodingKeys: String, CodingKey {
         case answeredAt = "answered_at"
-        case answers, note
+        case answers, note, by, stage
     }
 }
 
@@ -206,6 +223,7 @@ struct AgentTask: Codable, Identifiable, Hashable {
     }
 
     var parsedDecisions: [HumanDecision] { decode(decisions, as: [HumanDecision].self) ?? [] }
+    var agentDecisionCount: Int { parsedDecisions.filter(\.isAgent).reduce(0) { $0 + $1.answers.count } }
     var parsedDeclinedApprovals: [DeclinedApproval] { decode(declinedApprovals, as: [DeclinedApproval].self) ?? [] }
     var parsedAllowedApprovals: [DeclinedApproval] { decode(allowedApprovals, as: [DeclinedApproval].self) ?? [] }
     /// Waiting on a human answer that can resume the same session.
@@ -242,6 +260,7 @@ struct AgentTask: Codable, Identifiable, Hashable {
             case "fixing": return "Fixing review"
             case "frontend": return "Claude coding UI"
             case "verifying": return "Running checks"
+            case "deciding": return "Agent deciding"
             default: return "Coding"
             }
         case "review": return "Needs review"
@@ -265,6 +284,7 @@ struct AgentTask: Codable, Identifiable, Hashable {
             case "reviewing": return "eye"
             case "frontend": return "paintbrush.pointed.fill"
             case "verifying": return "checklist"
+            case "deciding": return "person.badge.shield.checkmark"
             default: return "hammer.fill"
             }
         case "review": return "checkmark.circle.fill"

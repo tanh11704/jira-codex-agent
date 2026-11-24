@@ -66,8 +66,13 @@ class Settings(BaseSettings):
     verify_commands_base64: str = ''
     verify_fix_rounds: int = Field(default=2, ge=0, le=5)  # agent fix passes after a failed check; 0 only reports
     verify_timeout_seconds: int = Field(default=1800, ge=30)  # per command
+    # A failing check is rerun on the base commit; failures already there are reported, not blamed on the task.
+    baseline_checks: bool = True
+    baseline_setup_command: str = ''  # run once in the baseline worktree before its checks, e.g. pnpm install
+    # Command approval requests matching these shell-style patterns are accepted without a human (base64, one per line).
+    auto_approve_commands_base64: str = ''
 
-    @field_validator('codex_prompt_base64', 'verify_commands_base64')
+    @field_validator('codex_prompt_base64', 'verify_commands_base64', 'auto_approve_commands_base64')
     @classmethod
     def validate_prompt(cls, value: str) -> str:
         if value:
@@ -83,6 +88,11 @@ class Settings(BaseSettings):
     def verify_commands(self) -> list[str]:
         text = base64.b64decode(self.verify_commands_base64).decode('utf-8') if self.verify_commands_base64 else ''
         return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('#')]
+
+    @property
+    def auto_approve_commands(self) -> list[str]:
+        text = base64.b64decode(self.auto_approve_commands_base64).decode('utf-8') if self.auto_approve_commands_base64 else ''
+        return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('#')]
     codex_approvals_reviewer: Literal['user', 'auto_review'] = 'user'
 
     # Optional Claude Code passes around Codex, both read-only: a plan before coding and a review after COMPLETED.
@@ -96,6 +106,10 @@ class Settings(BaseSettings):
     claude_effort: str | None = None  # low | medium | high | xhigh | max
     # Codex fix passes allowed after Claude requests changes; 0 only reports the review.
     claude_review_rounds: int = Field(default=1, ge=0, le=5)
+    # Claude answers open product questions as the product owner (at planning and when the coder asks), so work
+    # continues unattended; every decision it makes is summarized in the final report for the human to confirm.
+    claude_decide: bool = False
+    claude_decide_rounds: int = Field(default=2, ge=0, le=5)
     claude_timeout_seconds: int = Field(default=1800, ge=60)
     # Claude passes are skipped while the subscription's remaining 5-hour / weekly usage is at or below these.
     claude_quota_remaining_threshold: int = Field(default=30, ge=0, le=100)

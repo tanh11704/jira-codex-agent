@@ -154,6 +154,19 @@ final class AgentStore: ObservableObject {
         }
     }
 
+    /// Let Claude answer a waiting task's questions as the product owner; the task resumes once it has decided.
+    func decideTask(_ task: AgentTask) async -> Bool {
+        do {
+            _ = try await client.request("decide:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
+            taskActionError = nil
+            await refresh()
+            return true
+        } catch {
+            taskActionError = error.localizedDescription
+            return false
+        }
+    }
+
     func resumeTask(_ task: AgentTask) async {
         do {
             _ = try await client.request("resume_task:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
@@ -231,9 +244,14 @@ final class AgentStore: ObservableObject {
     @Published var claudeFrontend = false
     @Published var verifyCommands = ""
     @Published var verifyFixRounds = 2
+    @Published var baselineChecks = true
+    @Published var baselineSetupCommand = ""
+    @Published var autoApproveCommands = ""
     @Published var claudeModel = ""
     @Published var claudeEffort = ""
     @Published var claudeReviewRounds = 1
+    @Published var claudeDecide = false
+    @Published var claudeDecideRounds = 2
     @Published var claudeQuotaFiveHourThreshold = 30
     @Published var claudeQuotaWeeklyThreshold = 30
     @Published var claudeMaxTurns = 0
@@ -434,6 +452,9 @@ final class AgentStore: ObservableObject {
             ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
             ("JCA_VERIFY_COMMANDS_BASE64", verifyCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : Data(verifyCommands.utf8).base64EncodedString()),
             ("JCA_VERIFY_FIX_ROUNDS", String(verifyFixRounds)),
+            ("JCA_BASELINE_CHECKS", baselineChecks ? "true" : "false"),
+            ("JCA_BASELINE_SETUP_COMMAND", baselineSetupCommand.trimmingCharacters(in: .whitespacesAndNewlines)),
+            ("JCA_AUTO_APPROVE_COMMANDS_BASE64", autoApproveCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : Data(autoApproveCommands.utf8).base64EncodedString()),
             ("JCA_CLAUDE_COMMAND", claudePath),
             ("JCA_CLAUDE_PLAN", claudePlan ? "true" : "false"),
             ("JCA_CLAUDE_REVIEW", claudeReview ? "true" : "false"),
@@ -441,6 +462,8 @@ final class AgentStore: ObservableObject {
             ("JCA_CLAUDE_MODEL", claudeModel),
             ("JCA_CLAUDE_EFFORT", claudeEffort),
             ("JCA_CLAUDE_REVIEW_ROUNDS", String(claudeReviewRounds)),
+            ("JCA_CLAUDE_DECIDE", claudeDecide ? "true" : "false"),
+            ("JCA_CLAUDE_DECIDE_ROUNDS", String(claudeDecideRounds)),
             ("JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD", String(claudeQuotaFiveHourThreshold)),
             ("JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(claudeQuotaWeeklyThreshold)),
             ("JCA_CLAUDE_MAX_TURNS", String(claudeMaxTurns)),
@@ -592,6 +615,12 @@ final class AgentStore: ObservableObject {
             verifyCommands = text
         }
         verifyFixRounds = min(5, max(0, Int(values["JCA_VERIFY_FIX_ROUNDS"] ?? "2") ?? 2))
+        baselineChecks = values["JCA_BASELINE_CHECKS"] != "false"
+        baselineSetupCommand = values["JCA_BASELINE_SETUP_COMMAND"] ?? ""
+        if let encoded = values["JCA_AUTO_APPROVE_COMMANDS_BASE64"], let data = Data(base64Encoded: encoded),
+           let text = String(data: data, encoding: .utf8) {
+            autoApproveCommands = text
+        }
         claudePath = values["JCA_CLAUDE_COMMAND"] ?? claudePath
         claudePlan = values["JCA_CLAUDE_PLAN"] == "true"
         claudeReview = values["JCA_CLAUDE_REVIEW"] == "true"
@@ -599,6 +628,8 @@ final class AgentStore: ObservableObject {
         claudeModel = values["JCA_CLAUDE_MODEL"] ?? claudeModel
         claudeEffort = values["JCA_CLAUDE_EFFORT"] ?? claudeEffort
         claudeReviewRounds = min(5, max(0, Int(values["JCA_CLAUDE_REVIEW_ROUNDS"] ?? "1") ?? 1))
+        claudeDecide = values["JCA_CLAUDE_DECIDE"] == "true"
+        claudeDecideRounds = min(5, max(0, Int(values["JCA_CLAUDE_DECIDE_ROUNDS"] ?? "2") ?? 2))
         claudeQuotaFiveHourThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeQuotaWeeklyThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeMaxTurns = max(0, Int(values["JCA_CLAUDE_MAX_TURNS"] ?? "0") ?? 0)

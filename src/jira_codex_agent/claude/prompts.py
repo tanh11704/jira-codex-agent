@@ -55,6 +55,32 @@ REVIEW_SCHEMA = {
 }
 
 
+CONFIDENCES = ("high", "medium", "low")
+DECIDE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "decisions"],
+    "properties": {
+        "summary": {"type": "string", "description": "One or two sentences in Vietnamese on the overall direction chosen"},
+        "decisions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "question", "answer", "rationale", "confidence", "sources"],
+            "properties": {
+                "id": {"type": "string", "description": "The id of the question answered, exactly as given"},
+                "question": {"type": "string", "description": "The question, copied as given"},
+                "answer": {"type": "string",
+                           "description": "The decision in Vietnamese, concrete enough to implement without asking again"},
+                "rationale": {"type": "string", "description": "Why, in Vietnamese, citing what you found"},
+                "confidence": {"type": "string", "enum": list(CONFIDENCES),
+                               "description": "high: specs or code settle it; medium: inferred from existing patterns; "
+                                              "low: a judgement call"},
+                "sources": {"type": "array", "items": {"type": "string"},
+                            "description": "Files the decision rests on (path, path#section or path:line); empty when none"},
+            }}},
+    },
+}
+
+
 def plan_prompt(task: str, instructions: str) -> str:
     return f"""You are the planning lead for an autonomous Jira implementation. Another coding agent with a much smaller context window will implement the issue from your plan in this Git worktree, so do the wide reading it cannot afford.
 
@@ -121,7 +147,7 @@ def plan_markdown(plan: dict) -> str:
 def plan_section(plan: str) -> str:
     return f"""
 IMPLEMENTATION PLAN (prepared by a planning reviewer who read the codebase)
-Follow it unless the code proves a step wrong; then deviate and explain why in the report. If its open questions block the work, report NEEDS_HUMAN_REVIEW.
+Follow it unless the code proves a step wrong; then deviate and explain why in the report. Open questions answered under DECISIONS are settled; follow those answers. If an unanswered open question blocks the work, report NEEDS_HUMAN_REVIEW.
 {plan}
 """
 
@@ -172,3 +198,56 @@ Fix every valid blocker and major finding; apply minor ones when cheap and safe.
 
 {contract}
 """
+
+
+def decide_prompt(task: str, plan: str | None, questions: list[dict]) -> str:
+    plan_text = f"\nThe implementation plan:\n{plan}\n" if plan else ''
+    asked = '\n\n'.join(
+        f"[{item.get('id')}] {item.get('question', '')}"
+        + (f"\nContext: {item['context']}" if item.get('context') else '')
+        + (''.join(f"\n  - Option: {option}" for option in item.get('options') or []))
+        for item in questions)
+    return f"""You act as the product owner and end user for an autonomous Jira implementation. The implementing agent stopped on decisions it would not make alone. Decide every one of them now so the work can continue unattended. Never leave a question open or defer it to a human: a human reviews all of your decisions after the work is finished and will correct the ones they disagree with.
+
+Read the repository read-only to ground each decision: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md), SRS, feature inventory, architecture, contracts, and the existing code, tests and migrations. Do not modify any file.
+Decide in this order of evidence: the issue's acceptance criteria and the specs; earlier DECISIONS on this issue; patterns the codebase already follows for the same kind of feature; then judgement. When judging, prefer least privilege and tenant isolation, audit trails for writes and privileged actions, reversible over destructive behaviour, and the smallest scope that satisfies the acceptance criteria.
+When a question lists options, pick one of them unless every option contradicts the specs; then give your own answer and say why. Make each answer concrete enough to implement without asking again (names, values, which roles, which cases). Answer exactly the questions below, keeping their ids. Write answers and rationales in Vietnamese.
+
+{task}
+{plan_text}
+QUESTIONS TO DECIDE
+{asked}
+"""
+
+
+def decisions_prompt(answers: list[dict], contract: str) -> str:
+    lines = '\n'.join(f"- Q: {item['question']}\n  A: {item['answer']}" for item in answers)
+    return f"""The product owner answered your questions. These answers are authoritative: implement accordingly in this same worktree, finish the remaining work, run the relevant checks and report again. Do not ask these questions again; ask only decisions that are genuinely new.
+{lines}
+
+{contract}
+"""
+
+
+def decisions_report(decisions: list[dict]) -> str:
+    """The handoff section listing every decision the agent made, for the human to confirm."""
+    labels = {'high': 'cao', 'medium': 'trung bình', 'low': 'thấp'}
+    stages = {'plan': 'lúc lập kế hoạch', 'report': 'khi agent code hỏi', 'manual': 'theo yêu cầu của bạn'}
+    lines, number = [], 0
+    for decision in decisions:
+        if decision.get('by') != 'agent':
+            continue
+        for item in decision.get('answers') or []:
+            number += 1
+            meta = f"Độ tin cậy: {labels.get(item.get('confidence'), item.get('confidence') or '?')}"
+            meta += f" · {stages.get(decision.get('stage'), decision.get('stage') or '')}"
+            if item.get('sources'):
+                meta += ' · Nguồn: ' + ', '.join(item['sources'])
+            lines.append(f"{number}. **{item['question']}**\n   - Quyết định: {item['answer']}"
+                         + (f"\n   - Lý do: {item['rationale']}" if item.get('rationale') else '')
+                         + f"\n   - {meta}")
+    if not lines:
+        return ''
+    return ('## Quyết định do agent đưa ra (cần bạn xác nhận)\n'
+            'Agent đã tự quyết các điểm dưới đây để hoàn thành task. Hãy xem lại; nếu sai, chạy lại task kèm ghi chú.\n\n'
+            + '\n'.join(lines))

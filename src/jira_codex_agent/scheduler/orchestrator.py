@@ -11,7 +11,8 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, classify_prompt,
+from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, DECIDE_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA,
+                                             classify_prompt, decide_prompt, decisions_prompt, decisions_report,
                                              findings_text, fix_prompt, frontend_scope, merge_reports, plan_markdown,
                                              plan_prompt, plan_section, review_prompt)
 from jira_codex_agent.claude.quota import ClaudeQuotaReader
@@ -26,7 +27,8 @@ from jira_codex_agent.jira.client import JiraClient
 from jira_codex_agent.jira.models import JiraIssue, adf_to_text
 from jira_codex_agent.macos import SleepGuard
 from jira_codex_agent.storage.database import Database, TaskState
-from jira_codex_agent.verify.checks import check_fix_prompt, checks_section, failure_feedback, run_checks
+from jira_codex_agent.verify.checks import (CheckResult, check_fix_prompt, checks_section, failure_feedback,
+                                            failure_signature, run_check)
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +70,9 @@ class Orchestrator:
         self.idle_event = asyncio.Event()
         self.idle_event.set()
         self._last_prune: float | None = None
+        self._deciding: set[str] = set()
+        self._baseline: dict[str, dict[str, dict]] = {}  # base commit → command → {ok, signature}
+        self._background: set[asyncio.Task] = set()
 
     def _setting(self, name: str, default):
         return getattr(self.settings, name, default)
@@ -133,6 +138,7 @@ class Orchestrator:
             log.exception("history pruning failed")
 
     async def run_cycle(self) -> bool:
+        self._decide_backlog()
         pending = self.database.due_recovery()
         if pending:
             if self.settings.dry_run or not await self._respect_quota():
@@ -202,7 +208,12 @@ class Orchestrator:
             finished, planned = await self._guarded(issue.key, self._plan(issue, task, worktree))
             if not finished:
                 return
-            plan, area = planned
+            plan, area, questions = planned
+            if questions and self._deciding_enabled():
+                finished, _ = await self._guarded(issue.key, self._decide_plan(issue, task, worktree, plan, questions))
+                if not finished:
+                    return
+                task = self.database.get_task(issue.key) or task
         if not resume and claude_codes_ui and area is None:
             self.database.update_task(issue.key, TaskState.CODING, phase='planning')
             finished, area = await self._guarded(issue.key, self._classify(issue, task, worktree))
@@ -258,7 +269,8 @@ class Orchestrator:
         async def code() -> CodexRunResult:
             first = await self.runner.run(prompt, worktree, session_id=session_id, on_event=record,
                                           output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
-            return await self._verify(issue.key, worktree, first, codex_fix, 'Codex')
+            verified = await self._verify(issue.key, worktree, first, codex_fix, 'Codex')
+            return await self._settle(issue, worktree, plan, verified, codex_fix, 'Codex', scope)
 
         finished, result = await self._guarded(issue.key, code())
         if not finished:
@@ -291,26 +303,33 @@ class Orchestrator:
         return list(getattr(self.settings, 'verify_commands', None) or [])
 
     async def _verify(self, key: str, worktree: Path, result: CodexRunResult, fix, agent: str) -> CodexRunResult:
-        """Run the configured build/test commands ourselves after a COMPLETED report.
+        """Run the configured build/test commands ourselves, outside the agent's sandbox.
 
-        A failure goes back to the agent as a trimmed excerpt for a bounded number of rounds; what still fails
-        downgrades the report to PARTIAL so a human looks at it. Passing checks are added to the report."""
+        Runs after a COMPLETED report, or a PARTIAL one whose only gap is checks the sandbox blocked. A failure goes
+        back to the agent as a trimmed excerpt for a bounded number of rounds; what still fails downgrades the report
+        to PARTIAL so a human looks at it. Failures that already happen on the base commit are reported, not blamed."""
         commands = self._verify_commands()
         rounds = self._setting('verify_fix_rounds', 2)
         timeout = self._setting('verify_timeout_seconds', 1800)
         for attempt in range(rounds + 1):
             report = parse_report(result.final_message) if commands and result.outcome == RunOutcome.SUCCEEDED else None
-            if not report or report['status'] != 'COMPLETED':
+            if not report or not self._verifiable(report):
                 return result
+            promoted = report['status'] != 'COMPLETED'
             self.database.update_task(key, TaskState.CODING, phase='verifying')
-            self.database.append_event(key, 'lifecycle', f'Running {len(commands)} local check(s)')
-            results = await run_checks(commands, worktree, timeout, on_result=lambda item: self.database.append_event(
-                key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} ({item.seconds}s)"
-                + ('' if item.ok else '\n' + item.output)))
-            checked = {item.command: 'PASS' if item.ok else 'FAIL' for item in results}
+            self.database.append_event(key, 'lifecycle', f'Running {len(commands)} local check(s)'
+                                       + (' that the sandbox blocked' if promoted else ''))
+            results, preexisting = await self._run_checks(key, worktree, commands, timeout)
+            checked = {item.command: 'PASS' if item.ok else ('PRE-EXISTING' if item in preexisting else 'FAIL')
+                       for item in results}
             report['tests'] = [test for test in report.get('tests') or [] if test.get('command') not in checked] + [
                 {'command': command, 'result': outcome} for command, outcome in checked.items()]
-            if all(item.ok for item in results):
+            if all(item.ok or item in preexisting for item in results):
+                if promoted:
+                    self.database.append_event(key, 'lifecycle', 'Checks blocked in the sandbox passed here; report upgraded to COMPLETED')
+                    report.update(status='COMPLETED', blockers=[], sandbox_blocked_only=False)
+                if preexisting:
+                    report['report'] = (report.get('report') or '').rstrip() + '\n\n' + self._preexisting_section(preexisting)
                 return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
             failed = results[-1].command
             if attempt == rounds:
@@ -319,9 +338,124 @@ class Orchestrator:
                 return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
             self.database.update_task(key, TaskState.CODING, phase='fixing')
             self.database.append_event(key, 'lifecycle', f'{agent} fixing failed check {failed} (round {attempt + 1}/{rounds})')
-            feedback = failure_feedback(results, commands[len(results):])
+            feedback = failure_feedback([item for item in results if item not in preexisting], commands[len(results):])
             result = await fix(check_fix_prompt(feedback, output_contract(self._setting('approval_timeout_seconds', 0))), result)
         return result
+
+    @staticmethod
+    def _verifiable(report: dict) -> bool:
+        if report['status'] == 'COMPLETED':
+            return True
+        return report['status'] == 'PARTIAL' and bool(report.get('sandbox_blocked_only')) and not report.get('questions')
+
+    def _preexisting_section(self, failures: list[CheckResult]) -> str:
+        listed = '\n'.join(f'- `{item.command}`' for item in failures)
+        return ('## Check lỗi sẵn có trên base\n'
+                'Các check sau cũng lỗi y hệt trên commit base, nên không tính là lỗi của task này:\n' + listed)
+
+    async def _run_checks(self, key: str, worktree: Path, commands: list[str],
+                          timeout: int) -> tuple[list[CheckResult], list[CheckResult]]:
+        """Run commands in order; stop at the first failure the base commit does not share."""
+        results, preexisting = [], []
+        for command in commands:
+            item = await run_check(command, worktree, timeout)
+            results.append(item)
+            self.database.append_event(key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} ({item.seconds}s)"
+                                       + ('' if item.ok else '\n' + item.output))
+            if item.ok:
+                continue
+            if await self._fails_on_base(key, worktree, item, timeout):
+                preexisting.append(item)
+                continue
+            break
+        return results, preexisting
+
+    async def _fails_on_base(self, key: str, worktree: Path, failed: CheckResult, timeout: int) -> bool:
+        """Whether the base commit fails this check with the same errors, so the task did not cause them."""
+        if not self._setting('baseline_checks', True) or not failed.signature:
+            return False
+        sha = await self._base_commit(worktree)
+        if not sha:
+            return False
+        entry = self._baseline.get(sha, {}).get(failed.command) or self._load_baseline().get(sha, {}).get(failed.command)
+        if entry is None:
+            self.database.append_event(key, 'lifecycle', f'Checking whether {failed.command} also fails on base {sha[:10]}')
+            base = await self._run_on_base(key, sha, failed.command, timeout)
+            if base is None:
+                return False
+            entry = {'ok': base.ok, 'signature': base.signature}
+            self._remember_baseline(sha, failed.command, entry)
+        if entry['ok']:
+            self.database.append_event(key, 'lifecycle', f'{failed.command} passes on base {sha[:10]}; the failure comes from this change')
+            return False
+        new = set(failed.signature) - set(entry['signature'])
+        if new:
+            self.database.append_event(key, 'lifecycle', f'{failed.command} also fails on base {sha[:10]}, but '
+                                       f'{len(new)} error line(s) are new, e.g. {sorted(new)[0]}')
+            return False
+        self.database.append_event(key, 'lifecycle', f'{failed.command} fails the same way on base {sha[:10]}; not blamed on this task')
+        return True
+
+    async def _base_commit(self, worktree: Path) -> str | None:
+        base = self._setting('base_branch', 'main')
+        for args in (('merge-base', 'HEAD', f'origin/{base}'), ('merge-base', 'HEAD', base), ('rev-parse', 'HEAD')):
+            if sha := (await self._git_output(worktree, *args) or '').strip():
+                return sha
+        return None
+
+    async def _run_on_base(self, key: str, sha: str, command: str, timeout: int) -> CheckResult | None:
+        """Run a check in a shared detached worktree at the base commit; ignored files (dependencies) are kept."""
+        root, repository = self._setting('worktree_root', None), self._setting('repository', None)
+        if not root or not repository:
+            return None
+        path = Path(root) / '_baseline'
+        if path.is_dir():
+            ready = await self._git_output(path, 'checkout', '--detach', '--force', sha) is not None \
+                and await self._git_output(path, 'clean', '-fd') is not None
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ready = await self._git_output(Path(repository), 'worktree', 'add', '--detach', str(path), sha) is not None
+        if not ready:
+            self.database.append_event(key, 'lifecycle', f'Could not prepare the base worktree at {sha[:10]}')
+            return None
+        if setup := (self._setting('baseline_setup_command', '') or '').strip():
+            prepared = await run_check(setup, path, timeout)
+            if not prepared.ok:
+                self.database.append_event(key, 'lifecycle', f'Base setup failed: {setup}\n{prepared.output}')
+                return None
+        return await run_check(command, path, timeout)
+
+    @staticmethod
+    async def _git_output(cwd: Path, *args: str) -> str | None:
+        try:
+            process = await asyncio.create_subprocess_exec('git', '-C', str(cwd), *args, stdout=asyncio.subprocess.PIPE,
+                                                           stderr=asyncio.subprocess.DEVNULL)
+        except OSError:
+            return None
+        stdout, _ = await process.communicate()
+        return stdout.decode(errors='replace') if process.returncode == 0 else None
+
+    def _baseline_path(self) -> Path | None:
+        data_dir = self._setting('data_dir', None)
+        return Path(data_dir) / 'baseline-checks.json' if data_dir else None
+
+    def _load_baseline(self) -> dict:
+        path = self._baseline_path()
+        try:
+            return json.loads(path.read_text()) if path and path.exists() else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _remember_baseline(self, sha: str, command: str, entry: dict) -> None:
+        self._baseline.setdefault(sha, {})[command] = entry
+        if path := self._baseline_path():
+            saved = self._load_baseline()
+            saved.setdefault(sha, {})[command] = entry
+            saved = dict(list(saved.items())[-5:])  # base commits move on; keep the latest few
+            try:
+                path.write_text(json.dumps(saved))
+            except OSError:
+                log.warning("could not save baseline check results")
 
     @staticmethod
     def _json(task: dict | None, column: str) -> list:
@@ -336,7 +470,7 @@ class Orchestrator:
             blockers = '; '.join(report.get('blockers') or [])
             parts.append(f"Your previous run ended {report['status']}" + (f': {blockers}' if blockers else '.'))
         if self._json(task, 'decisions'):
-            parts.append('A human has now answered your questions; see HUMAN DECISIONS below and continue accordingly.')
+            parts.append('Your questions have now been answered; see HUMAN DECISIONS below and continue accordingly.')
         review = json.loads(task['review']) if task.get('review') else None
         if report and report.get('status') == 'COMPLETED' and review and review.get('verdict') == 'REQUEST_CHANGES':
             parts.append('A code reviewer still requests changes; fix every valid blocker and major finding.\n'
@@ -361,7 +495,7 @@ class Orchestrator:
         fields: dict = {'declined_approvals': [item for item in declined if item not in allowed] or None}
         if answered or note:
             fields['decisions'] = self._json(task, 'decisions') + [
-                {'answered_at': datetime.now(timezone.utc).isoformat(), 'answers': answered, 'note': note}]
+                {'answered_at': datetime.now(timezone.utc).isoformat(), 'by': 'human', 'answers': answered, 'note': note}]
         if allowed:
             fields['allowed_approvals'] = self._json(task, 'allowed_approvals') + allowed
         self.database.update_task(key, TaskState(task['state']), **fields)
@@ -369,6 +503,129 @@ class Orchestrator:
                                    + (f', allowed {len(allowed)} request(s)' if allowed else '') + '; resuming')
         self.database.request_resume(key)
         self.wake_event.set()
+
+    def _deciding_enabled(self) -> bool:
+        return bool(self.claude and self._setting('claude_decide', False))
+
+    async def _decide(self, key: str, task_text: str, plan: str | None, questions: list[dict],
+                      worktree: Path) -> tuple[list[dict], str | None]:
+        """Claude answers open questions as the product owner; returns the answers (possibly fewer) and a summary."""
+        self.database.append_event(key, 'lifecycle', f'Claude deciding {len(questions)} open question(s) as product owner')
+        outcome = await self._ask_claude(key, decide_prompt(task_text, plan, questions), worktree, DECIDE_SCHEMA)
+        if not outcome.ok:
+            self.database.append_event(key, 'lifecycle', f'Claude could not decide: {outcome.error}')
+            return [], None
+        asked = {str(item.get('id')): item for item in questions}
+        answers = []
+        for item in outcome.data.get('decisions') or []:
+            answer = str(item.get('answer') or '').strip()
+            if not answer:
+                continue
+            question = asked.get(str(item.get('id')), {}).get('question') or str(item.get('question') or '')
+            answers.append({'question': question, 'answer': answer, 'rationale': str(item.get('rationale') or ''),
+                            'confidence': item.get('confidence') or 'low',
+                            'sources': [str(source) for source in item.get('sources') or []]})
+        summary = str(outcome.data.get('summary') or '').strip() or None
+        self.database.append_event(key, 'lifecycle', f'Claude decided {len(answers)}/{len(questions)} question(s)'
+                                   + (f': {summary}' if summary else ''))
+        return answers, summary
+
+    def _record_decisions(self, key: str, answers: list[dict], summary: str | None, stage: str) -> None:
+        task = self.database.get_task(key) or {}
+        decision = {'answered_at': datetime.now(timezone.utc).isoformat(), 'by': 'agent', 'stage': stage,
+                    'answers': answers, 'note': summary}
+        self.database.update_task(key, TaskState(task.get('state') or TaskState.CODING.value),
+                                  decisions=self._json(task, 'decisions') + [decision])
+
+    async def _decide_plan(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
+                           questions: list[str]) -> None:
+        """Settle the plan's open questions before anyone codes, so the coder starts with clear requirements."""
+        self.database.update_task(issue.key, TaskState.CODING, phase='deciding')
+        asked = [{'id': f'p{index}', 'question': question, 'context': '', 'options': []}
+                 for index, question in enumerate(questions, 1)]
+        answers, summary = await self._decide(issue.key, self._task_text(issue, task), plan, asked, worktree)
+        if answers:
+            self._record_decisions(issue.key, answers, summary, 'plan')
+
+    async def _settle(self, issue: JiraIssue, worktree: Path, plan: str | None, result: CodexRunResult, fix,
+                      agent: str, scope: str = '') -> CodexRunResult:
+        """When the coder stops on questions, Claude answers them and the coder continues, for a bounded number of rounds."""
+        if not self._deciding_enabled():
+            return result
+        rounds = self._setting('claude_decide_rounds', 2)
+        for attempt in range(rounds):
+            report = parse_report(result.final_message) if result.outcome == RunOutcome.SUCCEEDED else None
+            questions = (report or {}).get('questions') or []
+            if not report or report['status'] == 'COMPLETED' or not questions:
+                break
+            self.database.update_task(issue.key, TaskState.CODING, phase='deciding')
+            task = self.database.get_task(issue.key) or {}
+            answers, summary = await self._decide(issue.key, self._task_text(issue, task, scope), plan, questions, worktree)
+            if not answers:
+                break
+            self._record_decisions(issue.key, answers, summary, 'report')
+            self.database.update_task(issue.key, TaskState.CODING, phase='coding')
+            self.database.append_event(issue.key, 'lifecycle',
+                                       f'{agent} continuing with the decisions (round {attempt + 1}/{rounds})')
+            result = await fix(decisions_prompt(answers, output_contract(self._setting('approval_timeout_seconds', 0))),
+                               result)
+            result = await self._verify(issue.key, worktree, result, fix, agent)
+        return result
+
+    def request_decide(self, key: str) -> None:
+        """Let Claude answer a waiting task's questions in the background, then resume it with them."""
+        if not self.claude:
+            raise ValueError('Claude Code is not enabled')
+        task = self.database.get_task(key)
+        if not task or task['state'] not in ('needs_human', 'failed', 'interrupted'):
+            raise ValueError('Task is not waiting for you')
+        if not (json.loads(task['report']) if task.get('report') else {}).get('questions'):
+            raise ValueError('The task has no open questions')
+        if key in self._deciding:
+            raise ValueError('Claude is already deciding this task')
+        self._deciding.add(key)
+        job = asyncio.get_running_loop().create_task(self._decide_waiting(key))
+        self._background.add(job)
+        job.add_done_callback(self._background.discard)
+
+    def _decide_backlog(self) -> None:
+        """Hand tasks waiting on questions to Claude once, e.g. those stuck from before deciding was enabled.
+
+        A task the agent already decided for stays with the human, so a coder that keeps asking cannot loop forever."""
+        if not self._deciding_enabled():
+            return
+        for task in self.database.list_tasks(TaskState.NEEDS_HUMAN):
+            key = task['issue_key']
+            if key in self._deciding or any(item.get('by') == 'agent' for item in self._json(task, 'decisions')):
+                continue
+            if not (json.loads(task['report']) if task.get('report') else {}).get('questions'):
+                continue
+            self.database.append_event(key, 'lifecycle', 'Handing the open questions to the agent automatically')
+            self.request_decide(key)
+
+    async def _decide_waiting(self, key: str) -> None:
+        try:
+            task = self.database.get_task(key) or {}
+            questions = json.loads(task['report']).get('questions') or []
+            issue = await self.jira.get_issue(key)
+            worktree = Path(task['worktree']) if task.get('worktree') and Path(task['worktree']).is_dir() \
+                else Path(self.settings.repository)
+            answers, summary = await self._decide(key, self._task_text(issue, task), task.get('plan'), questions, worktree)
+            task = self.database.get_task(key) or {}
+            if task.get('state') not in ('needs_human', 'failed', 'interrupted'):
+                return  # the human answered or discarded it meanwhile
+            if not answers:
+                self.notify(f'{key}: agent could not decide', 'Answer the questions yourself')
+                return
+            self._record_decisions(key, answers, summary, 'manual')
+            self.database.append_event(key, 'lifecycle', f'Agent answered {len(answers)} question(s); resuming')
+            self.database.request_resume(key)
+            self.wake_event.set()
+        except Exception as exc:
+            log.exception("deciding %s failed", key)
+            self.database.append_event(key, 'error', f'Agent decision failed: {exc}')
+        finally:
+            self._deciding.discard(key)
 
     async def _guarded(self, key: str, work) -> tuple[bool, object]:
         """Await work unless the daemon stops or the user aborts first; returns (finished, result)."""
@@ -401,11 +658,13 @@ class Orchestrator:
         outcome = await self.claude.run(prompt, worktree, schema=schema,
                                         on_event=lambda event: self.database.append_event(key, event['type'], event['message']),
                                         **options)
-        usage = json.loads((self.database.get_task(key) or {}).get('claude_usage') or '{}')
+        current = self.database.get_task(key) or {}
+        usage = json.loads(current.get('claude_usage') or '{}')
         usage = {'input_tokens': usage.get('input_tokens', 0) + outcome.input_tokens,
                  'output_tokens': usage.get('output_tokens', 0) + outcome.output_tokens,
                  'passes': usage.get('passes', 0) + 1}
-        self.database.update_task(key, TaskState.CODING, claude_usage=usage)
+        # A decision pass may run for a task waiting in the human queue; keep whatever state it is in.
+        self.database.update_task(key, TaskState(current.get('state') or TaskState.CODING.value), claude_usage=usage)
         self.database.append_event(key, 'claude.usage',
                                    f'{outcome.input_tokens:,} input / {outcome.output_tokens:,} output tokens')
         return outcome
@@ -435,12 +694,12 @@ class Orchestrator:
                                          worktree, PLAN_SCHEMA)
         if not outcome.ok:
             self.database.append_event(issue.key, 'lifecycle', f'Claude plan unavailable; Codex plans alone: {outcome.error}')
-            return None, None
+            return None, None, []
         plan, area = plan_markdown(outcome.data), outcome.data.get('area')
         self.database.update_task(issue.key, TaskState.CODING, plan=plan, area=area)
         self.database.append_event(issue.key, 'lifecycle', f"Claude plan ready ({area or 'area unknown'}): "
                                    + outcome.data.get('summary', ''))
-        return plan, area
+        return plan, area, [str(item) for item in outcome.data.get('questions') or [] if str(item).strip()]
 
     async def _classify(self, issue: JiraIssue, task: dict, worktree: Path) -> str | None:
         """Ask Claude whether the issue is frontend, backend or full-stack work; None leaves it all to Codex."""
@@ -498,6 +757,7 @@ class Orchestrator:
                                                  resume=session, **options))
 
         result = await self._verify(key, worktree, shaped(outcome), fix, 'Claude Code')
+        result = await self._settle(issue, worktree, plan, result, fix, 'Claude Code')
         report = parse_report(result.final_message) if backend and result.outcome == RunOutcome.SUCCEEDED else None
         if report:
             result = result.model_copy(update={'final_message': json.dumps(merge_reports(backend, report), ensure_ascii=False)})
@@ -517,7 +777,8 @@ class Orchestrator:
             'The backend part is done. Now implement the frontend part of the issue in this worktree on top of it, '
             'following the same rules and plan, recapture screenshots of the changed UI and report on the whole issue.\n\n'
             + output_contract(self._setting('approval_timeout_seconds', 0)), result)
-        return await self._verify(issue.key, worktree, frontend, codex_fix, 'Codex')
+        frontend = await self._verify(issue.key, worktree, frontend, codex_fix, 'Codex')
+        return await self._settle(issue, worktree, plan, frontend, codex_fix, 'Codex')
 
     async def _review_loop(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
                            result: CodexRunResult, record, scope: str = '',
@@ -585,11 +846,17 @@ class Orchestrator:
                 blockers = f"{questions} question{'s' if questions > 1 else ''} to answer" + (f'; {blockers}' if blockers else '')
             error = (status or 'No status reported') + (f': {blockers}' if blockers else '')
         summary = (report or {}).get('summary') or result.final_message
+        decisions = self._json(self.database.get_task(key), 'decisions')
+        agent_decided = sum(len(item.get('answers') or []) for item in decisions if item.get('by') == 'agent')
+        if report and agent_decided:
+            report = {**report, 'report': (report.get('report') or '').rstrip() + '\n\n' + decisions_report(decisions)}
+            self.database.append_event(key, 'lifecycle', f'{agent_decided} decision(s) made by the agent; listed in the report for review')
         self.database.append_event(key, 'lifecycle', f'Task {state.value}: {error or summary}')
         self.database.update_task(key, state, session_id=result.session_id, result=result.model_dump(mode="json"),
                                   report=report, error=error, attempts=0, next_attempt_at=None,
                                   **({'review': review} if review is not None else {}))
-        self.notify(f'{key}: ' + ('ready for review' if state == TaskState.REVIEW else 'needs you'),
+        self.notify(f'{key}: ' + ('ready for review' if state == TaskState.REVIEW else 'needs you')
+                    + (f' · {agent_decided} agent decision(s) to check' if agent_decided else ''),
                     error or summary or 'Codex finished')
         return state
 

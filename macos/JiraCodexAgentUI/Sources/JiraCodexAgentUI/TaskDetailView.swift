@@ -143,6 +143,11 @@ struct TaskDetailView: View {
                     callout(task.state == "needs_human" ? "Needs your decision" : "Last error", error,
                             symbol: "exclamationmark.triangle.fill", color: task.state == "needs_human" ? .orange : .red)
                 }
+                if task.agentDecisionCount > 0 && !task.canAnswer {
+                    callout("\(task.agentDecisionCount) decision\(task.agentDecisionCount == 1 ? "" : "s") made by the agent",
+                            "Check them under Decisions so far before accepting this work. If one is wrong, retry the task with a note.",
+                            symbol: "person.badge.shield.checkmark", color: .blue)
+                }
                 if task.canAnswer {
                     section("Your decision") {
                         AnswerPanel(task: task).id(task.issueKey)
@@ -152,12 +157,32 @@ struct TaskDetailView: View {
                     section("Decisions so far") {
                         ForEach(Array(task.parsedDecisions.enumerated()), id: \.offset) { _, decision in
                             ForEach(decision.answers, id: \.self) { item in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.question).font(.caption).foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        if decision.isAgent {
+                                            Label("Agent", systemImage: "sparkles")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                                .background(Color.blue.opacity(0.15), in: Capsule())
+                                                .foregroundStyle(.blue)
+                                        }
+                                        Text(item.question).font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Text(item.answer).font(.callout)
+                                    if let rationale = item.rationale, !rationale.isEmpty {
+                                        Text(rationale).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    if decision.isAgent {
+                                        let sources = (item.sources ?? []).joined(separator: ", ")
+                                        Text(sources.isEmpty ? item.confidenceLabel : item.confidenceLabel + " · " + sources)
+                                            .font(.caption2)
+                                            .foregroundStyle(item.confidence == "low" ? Color.orange : Color.secondary)
+                                    }
                                 }
                             }
-                            if let note = decision.note { Label(note, systemImage: "text.bubble").font(.callout) }
+                            if let note = decision.note {
+                                Label(note, systemImage: decision.isAgent ? "sparkles" : "text.bubble").font(.callout)
+                            }
                         }
                         ForEach(task.parsedAllowedApprovals, id: \.self) { approval in
                             Label(approval.title, systemImage: "checkmark.shield").font(.caption.monospaced())
@@ -309,6 +334,7 @@ struct AnswerPanel: View {
     @State private var note = ""
     @State private var allowed: Set<Int> = []
     @State private var isSending = false
+    @State private var isDeciding = false
 
     private var questions: [ReportQuestion] { task.parsedReport?.questions ?? [] }
 
@@ -365,6 +391,16 @@ struct AnswerPanel: View {
             HStack {
                 Text("Resumes the same Codex session and worktree.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if !questions.isEmpty {
+                    Button(isDeciding ? "Agent deciding…" : "Let agent decide") {
+                        Task {
+                            isDeciding = true
+                            if !(await store.decideTask(task)) { isDeciding = false }
+                        }
+                    }
+                    .help("Claude answers these questions as product owner and resumes the task; you review its decisions at the end")
+                    .disabled(isDeciding || isSending)
+                }
                 Button(isSending ? "Sending…" : "Answer & resume") { Task { await send() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(!canSend || isSending)

@@ -9,7 +9,8 @@ STATUSES = ("COMPLETED", "PARTIAL", "BLOCKED_BRANCH", "BLOCKED_DEPENDENCY", "NEE
 REPORT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["status", "summary", "blockers", "questions", "tests", "screenshots", "images", "branch", "report"],
+    "required": ["status", "summary", "blockers", "questions", "sandbox_blocked_only", "tests", "screenshots", "images",
+                 "branch", "report"],
     "properties": {
         "status": {"type": "string", "enum": list(STATUSES)},
         "summary": {"type": "string", "description": "One or two sentences on the resulting behaviour"},
@@ -22,6 +23,10 @@ REPORT_SCHEMA = {
                            "context": {"type": "string", "description": "Why it matters and what you found"},
                            "options": {"type": "array", "items": {"type": "string"},
                                        "description": "Concrete choices you would accept; empty for free text"}}}},
+        "sandbox_blocked_only": {"type": "boolean", "description": (
+            "true only when the implementation is complete and the sole reason it is not COMPLETED is checks your "
+            "sandbox cannot run (Docker/Testcontainers, sockets, network); the automation then runs its local checks "
+            "outside the sandbox")},
         "tests": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["command", "result"],
             "properties": {"command": {"type": "string"},
@@ -68,6 +73,7 @@ def parse_report(message: str) -> dict | None:
             continue
         if isinstance(data, dict) and data.get("status") in STATUSES:
             data.setdefault("questions", [])  # reports written before questions existed
+            data.setdefault("sandbox_blocked_only", False)
             data.setdefault("screenshots", [])
             data.setdefault("images", [])
             return data

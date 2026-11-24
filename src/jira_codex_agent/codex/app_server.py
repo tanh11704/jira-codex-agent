@@ -1,6 +1,9 @@
 import asyncio
+import fnmatch
 import json
 import os
+import re
+import shlex
 import signal
 import uuid
 
@@ -12,9 +15,40 @@ def approval_matches(details, allowed):
     return details.get('kind') == allowed.get('kind') and (details.get('command') or None) == (allowed.get('command') or None)
 
 
+# Anything that chains, pipes, redirects or substitutes could smuggle a second command past a pattern.
+UNSAFE_SHELL = re.compile(r'[;|<>`\n]|\$\(|(?<!&)&(?!&)|&&&')
+SHELL_WRAPPER = re.compile(r'^(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(.+)$', re.DOTALL)
+
+
+def command_text(command) -> str:
+    """The command a request runs, without the `zsh -lc '…'` wrapper Codex adds."""
+    text = shlex.join(command) if isinstance(command, list) else str(command or '')
+    text = text.strip()
+    if match := SHELL_WRAPPER.match(text):
+        inner = match.group(1).strip()
+        try:
+            parts = shlex.split(inner)
+            text = parts[0] if len(parts) == 1 else inner
+        except ValueError:
+            text = inner
+    return text.strip()
+
+
+def auto_approved(command, patterns) -> bool:
+    """Whether every step of a command matches an allow-listed pattern; `cd <dir> &&` steps are always allowed."""
+    text = command_text(command)
+    if not text or not patterns or UNSAFE_SHELL.search(text):
+        return False
+    steps = [step.strip() for step in text.split('&&')]
+    if not steps or not all(steps):
+        return False
+    return all(re.fullmatch(r'cd\s+\S+', step) or any(fnmatch.fnmatchcase(step, pattern) for pattern in patterns)
+               for step in steps)
+
+
 class CodexRunner:
     def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0,
-                 reasoning_effort=None, service_tier=None):
+                 reasoning_effort=None, service_tier=None, auto_approve=None):
         if approvals_reviewer not in ('user', 'auto_review'):
             raise ValueError('Unsupported approval reviewer')
         self.approvals_reviewer = approvals_reviewer
@@ -22,6 +56,7 @@ class CodexRunner:
         self.approval_timeout = approval_timeout
         self.command, self.model, self.timeout = command, model, timeout
         self.reasoning_effort, self.service_tier = reasoning_effort, service_tier
+        self.auto_approve = list(auto_approve or [])  # command patterns accepted without a human
         self.approvals, self._answers = {}, {}
 
     def answer_approval(self, token, decision):
@@ -125,6 +160,10 @@ class CodexRunner:
             if any(approval_matches(details, allowed) for allowed in preapproved or []):
                 await send({'id': message['id'], 'result': answer('accept')})
                 emit({'type': 'approval.preapproved', 'message': 'Allowed earlier by a human: ' + (details['command'] or method)})
+                return
+            if method == 'item/commandExecution/requestApproval' and auto_approved(details['command'], self.auto_approve):
+                await send({'id': message['id'], 'result': answer('accept')})
+                emit({'type': 'approval.auto', 'message': 'Allowed by the command allowlist: ' + command_text(details['command'])})
                 return
             future = asyncio.get_running_loop().create_future()
             self.approvals[token], self._answers[token] = details, future

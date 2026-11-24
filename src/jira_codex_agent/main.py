@@ -133,6 +133,12 @@ class ControlServer:
                 self.orchestrator.answer(command.split(':', 1)[1], payload.get('answers') or [], payload.get('note'),
                                          [int(index) for index in payload.get('allow') or []])
                 response = {'accepted': True, 'paused': self.database.is_paused()}
+            elif command.startswith('decide:'):
+                # decide:<key>; Claude answers a waiting task's questions as the product owner, then it resumes.
+                if not self.orchestrator:
+                    raise ValueError('Deciding unavailable')
+                self.orchestrator.request_decide(command.split(':', 1)[1])
+                response = {'accepted': True, 'paused': self.database.is_paused()}
             elif command.startswith('resume_task:'):
                 self.database.request_resume(command.split(':', 1)[1])
                 if self.orchestrator:
@@ -192,16 +198,17 @@ async def run_daemon(settings: Settings | None = None) -> None:
                     approvals_reviewer=settings.codex_approvals_reviewer,
                     approval_timeout=settings.approval_timeout_seconds,
                     reasoning_effort=settings.codex_reasoning_effort,
-                    service_tier=settings.codex_service_tier),
+                    service_tier=settings.codex_service_tier,
+                    auto_approve=settings.auto_approve_commands),
         QuotaReader(settings.codex_command),
         WorktreeManager(settings.repository, settings.worktree_root, settings.base_branch),
         notify=Notifier(settings.notifications),
         sleep_guard=SleepGuard(settings.prevent_sleep),
         claude=ClaudeRunner(settings.claude_command, settings.claude_model, settings.claude_effort,
                             settings.claude_timeout_seconds, settings.claude_max_turns)
-        if settings.claude_plan or settings.claude_review or settings.claude_frontend else None,
+        if settings.claude_plan or settings.claude_review or settings.claude_frontend or settings.claude_decide else None,
         claude_quota=ClaudeQuotaReader(settings.claude_command, cwd=settings.data_dir)
-        if settings.claude_plan or settings.claude_review or settings.claude_frontend else None,
+        if settings.claude_plan or settings.claude_review or settings.claude_frontend or settings.claude_decide else None,
     )
     control.orchestrator = orchestrator
     try:

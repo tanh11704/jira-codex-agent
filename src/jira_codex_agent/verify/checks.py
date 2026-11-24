@@ -15,6 +15,7 @@ TAIL_LINES = 40
 ERROR_LINE = re.compile(r'error|fail|exception|traceback|cannot|unable|not found|undefined|expected|assert|✗|✘|×',
                         re.IGNORECASE)
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+MAX_SIGNATURE_LINES = 2000
 
 
 class CheckResult(BaseModel):
@@ -23,6 +24,21 @@ class CheckResult(BaseModel):
     exit_code: int | None = None
     seconds: float = 0
     output: str = ''  # trimmed log, only kept for failures
+    signature: list[str] = []  # normalized error lines of the full log, to compare a failure with the base commit
+
+
+def failure_signature(text: str, root: Path | str | None = None) -> list[str]:
+    """Error lines of a log made comparable across worktrees and runs: no paths, numbers, timings or colours."""
+    if root:
+        text = text.replace(str(root), '')
+    lines = set()
+    for line in ANSI.sub('', text).replace('\r', '\n').splitlines():
+        if not ERROR_LINE.search(line):
+            continue
+        line = re.sub(r'\s+', ' ', re.sub(r'\d+', '#', line)).strip().lower()
+        if line:
+            lines.add(line[:300])
+    return sorted(lines)[:MAX_SIGNATURE_LINES]
 
 
 def trim_output(text: str, limit: int = MAX_FEEDBACK_CHARS) -> str:
@@ -68,8 +84,9 @@ async def run_check(command: str, cwd: Path, timeout: int) -> CheckResult:
         return CheckResult(command=command, ok=False, seconds=time.monotonic() - started,
                            output=f'Timed out after {timeout}s')
     ok = process.returncode == 0
+    text = '' if ok else output.decode(errors='replace')
     return CheckResult(command=command, ok=ok, exit_code=process.returncode, seconds=round(time.monotonic() - started, 1),
-                       output='' if ok else trim_output(output.decode(errors='replace')))
+                       output=trim_output(text) if text else '', signature=failure_signature(text, cwd) if text else [])
 
 
 async def run_checks(commands: list[str], cwd: Path, timeout: int, on_result=None) -> list[CheckResult]:
@@ -105,6 +122,7 @@ LOCAL CHECKS (run by the automation, not by you)
 After you report COMPLETED, the automation runs these commands in this worktree on the developer's machine, in order:
 {listed}
 Do not run them, or any other full build or full test suite, yourself: their logs fill your context and waste tokens. While coding, run only narrow and fast checks when you need them (one test file, one type-check, one lint target). If a command fails you get its trimmed output in this session to fix; when all pass they are added to your report. In "tests", list only the checks you ran yourself.
+These commands run outside your sandbox, with Docker, Testcontainers and the network available. When a check needs those and your sandbox blocks it, do not request escalation or retry it: mark it BLOCKED in "tests" and, if the implementation is otherwise complete, report COMPLETED (or set "sandbox_blocked_only" to true) so the automation verifies it here. A failure that already exists on the base commit is detected automatically and not blamed on you.
 """
 
 
