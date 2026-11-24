@@ -21,7 +21,7 @@ from jira_codex_agent.codex.models import CodexRunResult, RunOutcome
 from jira_codex_agent.codex.quota import QuotaReader
 from jira_codex_agent.codex.report import REPORT_SCHEMA, output_contract, parse_report
 from jira_codex_agent.codex.runner import CodexRunner
-from jira_codex_agent.config import Settings
+from jira_codex_agent.config import DEFAULT_DECIDE_INSTRUCTIONS, Settings
 from jira_codex_agent.git.worktree import WorktreeManager
 from jira_codex_agent.jira.client import JiraClient
 from jira_codex_agent.jira.models import JiraIssue, adf_to_text
@@ -511,7 +511,8 @@ class Orchestrator:
                       worktree: Path) -> tuple[list[dict], str | None]:
         """Claude answers open questions as the product owner; returns the answers (possibly fewer) and a summary."""
         self.database.append_event(key, 'lifecycle', f'Claude deciding {len(questions)} open question(s) as product owner')
-        outcome = await self._ask_claude(key, decide_prompt(task_text, plan, questions), worktree, DECIDE_SCHEMA)
+        instructions = self._setting('decide_instructions', None) or DEFAULT_DECIDE_INSTRUCTIONS
+        outcome = await self._ask_claude(key, decide_prompt(task_text, plan, questions, instructions), worktree, DECIDE_SCHEMA)
         if not outcome.ok:
             self.database.append_event(key, 'lifecycle', f'Claude could not decide: {outcome.error}')
             return [], None

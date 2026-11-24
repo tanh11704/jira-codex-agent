@@ -187,6 +187,14 @@ final class AgentStore: ObservableObject {
     @Published var codexModel = ""
     @Published var codexReasoningEffort = ""
     @Published var codexServiceTier = ""
+    static let defaultDecidePrompt = """
+    You act as the product owner and end user for an autonomous Jira implementation. The implementing agent stopped on decisions it would not make alone. Decide every one of them now so the work can continue unattended. Never leave a question open or defer it to a human: a human reviews all of your decisions after the work is finished and will correct the ones they disagree with.
+
+    Read the repository read-only to ground each decision: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md), SRS, feature inventory, architecture, contracts, and the existing code, tests and migrations. Do not modify any file.
+    Decide in this order of evidence: the issue's acceptance criteria and the specs; earlier DECISIONS on this issue; patterns the codebase already follows for the same kind of feature; then judgement. When judging, prefer least privilege and tenant isolation, audit trails for writes and privileged actions, reversible over destructive behaviour, and the smallest scope that satisfies the acceptance criteria.
+    When a question lists options, pick one of them unless every option contradicts the specs; then give your own answer and say why. Make each answer concrete enough to implement without asking again (names, values, which roles, which cases). Write answers and rationales in Vietnamese.
+    """
+
     static let defaultTaskPrompt = """
     You are an autonomous implementation agent working on ONE Jira issue in a dedicated TeachMate EMS / ExamTwin Git worktree. Implement only that issue and hand off local changes for human review.
 
@@ -252,6 +260,7 @@ final class AgentStore: ObservableObject {
     @Published var claudeReviewRounds = 1
     @Published var claudeDecide = false
     @Published var claudeDecideRounds = 2
+    @Published var decidePrompt = AgentStore.defaultDecidePrompt
     @Published var claudeQuotaFiveHourThreshold = 30
     @Published var claudeQuotaWeeklyThreshold = 30
     @Published var claudeMaxTurns = 0
@@ -464,6 +473,8 @@ final class AgentStore: ObservableObject {
             ("JCA_CLAUDE_REVIEW_ROUNDS", String(claudeReviewRounds)),
             ("JCA_CLAUDE_DECIDE", claudeDecide ? "true" : "false"),
             ("JCA_CLAUDE_DECIDE_ROUNDS", String(claudeDecideRounds)),
+            // Save the default as empty so the daemon follows future default updates instead of a stale copy.
+            ("JCA_CLAUDE_DECIDE_PROMPT_BASE64", decidePrompt == AgentStore.defaultDecidePrompt ? "" : Data(decidePrompt.utf8).base64EncodedString()),
             ("JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD", String(claudeQuotaFiveHourThreshold)),
             ("JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(claudeQuotaWeeklyThreshold)),
             ("JCA_CLAUDE_MAX_TURNS", String(claudeMaxTurns)),
@@ -630,6 +641,12 @@ final class AgentStore: ObservableObject {
         claudeReviewRounds = min(5, max(0, Int(values["JCA_CLAUDE_REVIEW_ROUNDS"] ?? "1") ?? 1))
         claudeDecide = values["JCA_CLAUDE_DECIDE"] == "true"
         claudeDecideRounds = min(5, max(0, Int(values["JCA_CLAUDE_DECIDE_ROUNDS"] ?? "2") ?? 2))
+        if let encoded = values["JCA_CLAUDE_DECIDE_PROMPT_BASE64"], let data = Data(base64Encoded: encoded),
+           let text = String(data: data, encoding: .utf8), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            decidePrompt = text
+        } else {
+            decidePrompt = AgentStore.defaultDecidePrompt
+        }
         claudeQuotaFiveHourThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeQuotaWeeklyThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeMaxTurns = max(0, Int(values["JCA_CLAUDE_MAX_TURNS"] ?? "0") ?? 0)

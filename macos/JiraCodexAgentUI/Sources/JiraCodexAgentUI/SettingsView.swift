@@ -243,6 +243,24 @@ struct SettingsView: View {
                 Text("Instead of waiting for you, Claude answers the plan's open questions before Codex codes, and the questions Codex asks while coding, using the specs and the existing code; Codex then continues in the same session. Every decision, with its reason, confidence and sources, is listed at the end of the report and in the task details so you can check it. If one is wrong, retry the task with a note.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                TextEditor(text: $store.decidePrompt)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 180)
+                    .accessibilityLabel("Product owner prompt")
+            } header: {
+                HStack {
+                    Text("Product owner prompt")
+                    Spacer()
+                    Button("Restore default") { store.decidePrompt = AgentStore.defaultDecidePrompt }
+                        .buttonStyle(.borderless)
+                        .disabled(store.decidePrompt == AgentStore.defaultDecidePrompt)
+                }
+            } footer: {
+                Text("How Claude decides: its role, which evidence it trusts and what it prefers when judging. The issue, plan and questions are added automatically, as is the rule to answer every question by id. Applies after the daemon restarts. An empty prompt uses the default.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(!store.claudeDecide)
             Section("Review") {
                 Stepper(store.claudeReviewRounds == 0 ? "Codex fix rounds: none (report only)" : "Codex fix rounds: \(store.claudeReviewRounds)",
                         value: $store.claudeReviewRounds, in: 0...5)

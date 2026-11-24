@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 USER_CONFIG_PATH = Path("~/.config/jira-codex-agent/config.env").expanduser()
 DEFAULT_TASK_INSTRUCTIONS = (Path(__file__).parent / "default_task_prompt.txt").read_text(encoding="utf-8").strip()
+DEFAULT_DECIDE_INSTRUCTIONS = (Path(__file__).parent / "default_decide_prompt.txt").read_text(encoding="utf-8").strip()
 UI_QUALITY_HEADING = "UI QUALITY AND VISUAL CHECK"
 VISUAL_DESIGN_HEADING = "VISUAL DESIGN AND IMAGERY"
 
@@ -72,7 +73,8 @@ class Settings(BaseSettings):
     # Command approval requests matching these shell-style patterns are accepted without a human (base64, one per line).
     auto_approve_commands_base64: str = ''
 
-    @field_validator('codex_prompt_base64', 'verify_commands_base64', 'auto_approve_commands_base64')
+    @field_validator('codex_prompt_base64', 'verify_commands_base64', 'auto_approve_commands_base64',
+                     'claude_decide_prompt_base64')
     @classmethod
     def validate_prompt(cls, value: str) -> str:
         if value:
@@ -83,6 +85,11 @@ class Settings(BaseSettings):
     def task_instructions(self) -> str:
         text = base64.b64decode(self.codex_prompt_base64).decode('utf-8') if self.codex_prompt_base64 else ''
         return with_ui_quality(text.strip()) if text.strip() else DEFAULT_TASK_INSTRUCTIONS
+
+    @property
+    def decide_instructions(self) -> str:
+        text = base64.b64decode(self.claude_decide_prompt_base64).decode('utf-8') if self.claude_decide_prompt_base64 else ''
+        return text.strip() or DEFAULT_DECIDE_INSTRUCTIONS
 
     @property
     def verify_commands(self) -> list[str]:
@@ -110,6 +117,7 @@ class Settings(BaseSettings):
     # continues unattended; every decision it makes is summarized in the final report for the human to confirm.
     claude_decide: bool = False
     claude_decide_rounds: int = Field(default=2, ge=0, le=5)
+    claude_decide_prompt_base64: str = ''  # the product owner's instructions; empty uses the default
     claude_timeout_seconds: int = Field(default=1800, ge=60)
     # Claude passes are skipped while the subscription's remaining 5-hour / weekly usage is at or below these.
     claude_quota_remaining_threshold: int = Field(default=30, ge=0, le=100)

@@ -104,3 +104,25 @@ async def test_waiting_backlog_is_decided_once_automatically(tmp_path):
     db.update_task('TM-1', TaskState.NEEDS_HUMAN)
     orchestrator._decide_backlog()
     assert not orchestrator._background and orchestrator.claude.run.await_count == 1
+
+
+def test_decide_prompt_is_configurable_but_keeps_the_fixed_contract():
+    import base64
+    from pathlib import Path
+    from jira_codex_agent.claude.prompts import decide_prompt
+    from jira_codex_agent.config import DEFAULT_DECIDE_INSTRUCTIONS, Settings
+    assert Settings.model_construct(claude_decide_prompt_base64='').decide_instructions == DEFAULT_DECIDE_INSTRUCTIONS
+    custom = Settings.model_construct(claude_decide_prompt_base64=base64.b64encode('Be a strict PO.'.encode()).decode())
+    prompt = decide_prompt('Implement TM-1', None, [QUESTION], custom.decide_instructions)
+    assert prompt.startswith('Be a strict PO.') and 'keeping its id' in prompt and '[q2] Cho phép khóa' in prompt
+    source = Path('macos/JiraCodexAgentUI/Sources/JiraCodexAgentUI/AgentStore.swift').read_text()
+    swift = source.split('static let defaultDecidePrompt = """\n', 1)[1].split('\n    """', 1)[0]
+    assert '\n'.join(line[4:] for line in swift.splitlines()) == DEFAULT_DECIDE_INSTRUCTIONS
+
+
+@pytest.mark.asyncio
+async def test_custom_decide_instructions_reach_claude(tmp_path):
+    db, orchestrator, _ = setup(tmp_path, [DECIDED], [ASKS, COMPLETED], claude_decide=True,
+                                decide_instructions='Always pick the narrowest option.')
+    await orchestrator.process(issue())
+    assert orchestrator.claude.run.await_args_list[0].args[0].startswith('Always pick the narrowest option.')

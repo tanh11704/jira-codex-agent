@@ -200,18 +200,17 @@ Fix every valid blocker and major finding; apply minor ones when cheap and safe.
 """
 
 
-def decide_prompt(task: str, plan: str | None, questions: list[dict]) -> str:
+def decide_prompt(task: str, plan: str | None, questions: list[dict], instructions: str) -> str:
+    """The product owner's instructions (configurable) followed by what it must decide (fixed)."""
     plan_text = f"\nThe implementation plan:\n{plan}\n" if plan else ''
     asked = '\n\n'.join(
         f"[{item.get('id')}] {item.get('question', '')}"
         + (f"\nContext: {item['context']}" if item.get('context') else '')
         + (''.join(f"\n  - Option: {option}" for option in item.get('options') or []))
         for item in questions)
-    return f"""You act as the product owner and end user for an autonomous Jira implementation. The implementing agent stopped on decisions it would not make alone. Decide every one of them now so the work can continue unattended. Never leave a question open or defer it to a human: a human reviews all of your decisions after the work is finished and will correct the ones they disagree with.
+    return f"""{instructions.strip()}
 
-Read the repository read-only to ground each decision: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md), SRS, feature inventory, architecture, contracts, and the existing code, tests and migrations. Do not modify any file.
-Decide in this order of evidence: the issue's acceptance criteria and the specs; earlier DECISIONS on this issue; patterns the codebase already follows for the same kind of feature; then judgement. When judging, prefer least privilege and tenant isolation, audit trails for writes and privileged actions, reversible over destructive behaviour, and the smallest scope that satisfies the acceptance criteria.
-When a question lists options, pick one of them unless every option contradicts the specs; then give your own answer and say why. Make each answer concrete enough to implement without asking again (names, values, which roles, which cases). Answer exactly the questions below, keeping their ids. Write answers and rationales in Vietnamese.
+Do not modify any file. Decide every question below; answer each one exactly once, keeping its id.
 
 {task}
 {plan_text}
