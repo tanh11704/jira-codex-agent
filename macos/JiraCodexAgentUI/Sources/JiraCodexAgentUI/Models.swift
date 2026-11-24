@@ -93,6 +93,21 @@ struct DecisionAnswer: Codable, Hashable {
     let rationale: String?
     let confidence: String?
     let sources: [String]?
+    let assumptions: [String]?
+    let acceptance: [String]?
+    let risk: String?  // LOW | MEDIUM | HIGH: impact if the decision is wrong
+
+    /// Worth checking first: high impact if wrong, or a judgement call.
+    var needsAttention: Bool { risk == "HIGH" || confidence == "low" }
+
+    var riskLabel: String? {
+        switch risk {
+        case "HIGH": return "High risk"
+        case "MEDIUM": return "Medium risk"
+        case "LOW": return "Low risk"
+        default: return nil
+        }
+    }
 
     var confidenceLabel: String {
         switch confidence {

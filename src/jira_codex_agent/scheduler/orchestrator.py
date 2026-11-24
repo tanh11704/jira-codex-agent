@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, DECIDE_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA,
-                                             classify_prompt, decide_prompt, decisions_prompt, decisions_report,
+                                             RISKS, classify_prompt, decide_prompt, decision_lines, decisions_prompt,
+                                             decisions_report,
                                              findings_text, fix_prompt, frontend_scope, merge_reports, plan_markdown,
                                              plan_prompt, plan_section, review_prompt)
 from jira_codex_agent.claude.quota import ClaudeQuotaReader
@@ -524,7 +525,10 @@ class Orchestrator:
                 continue
             question = asked.get(str(item.get('id')), {}).get('question') or str(item.get('question') or '')
             answers.append({'question': question, 'answer': answer, 'rationale': str(item.get('rationale') or ''),
+                            'assumptions': [str(text) for text in item.get('assumptions') or [] if str(text).strip()],
+                            'acceptance': [str(text) for text in item.get('acceptance') or [] if str(text).strip()],
                             'confidence': item.get('confidence') or 'low',
+                            'risk': item.get('risk') if item.get('risk') in RISKS else 'MEDIUM',
                             'sources': [str(source) for source in item.get('sources') or []]})
         summary = str(outcome.data.get('summary') or '').strip() or None
         self.database.append_event(key, 'lifecycle', f'Claude decided {len(answers)}/{len(questions)} question(s)'
@@ -997,7 +1001,7 @@ class Orchestrator:
         if decisions := self._json(task, 'decisions'):
             lines = []
             for decision in decisions:
-                lines += [f"- Q: {item['question']}\n  A: {item['answer']}" for item in decision.get('answers') or []]
+                lines += [decision_lines(item) for item in decision.get('answers') or []]
                 if decision.get('note'):
                     lines.append(f"- Note: {decision['note']}")
             context += '\nHUMAN DECISIONS (authoritative answers to earlier questions; follow them):\n' + '\n'.join(lines) + '\n'

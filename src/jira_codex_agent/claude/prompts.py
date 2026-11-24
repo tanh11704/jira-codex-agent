@@ -56,6 +56,7 @@ REVIEW_SCHEMA = {
 
 
 CONFIDENCES = ("high", "medium", "low")
+RISKS = ("LOW", "MEDIUM", "HIGH")
 DECIDE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -64,16 +65,25 @@ DECIDE_SCHEMA = {
         "summary": {"type": "string", "description": "One or two sentences in Vietnamese on the overall direction chosen"},
         "decisions": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "question", "answer", "rationale", "confidence", "sources"],
+            "required": ["id", "question", "answer", "rationale", "assumptions", "acceptance", "confidence", "risk",
+                         "sources"],
             "properties": {
                 "id": {"type": "string", "description": "The id of the question answered, exactly as given"},
                 "question": {"type": "string", "description": "The question, copied as given"},
                 "answer": {"type": "string",
                            "description": "The decision in Vietnamese, concrete enough to implement without asking again"},
                 "rationale": {"type": "string", "description": "Why, in Vietnamese, citing what you found"},
+                "assumptions": {"type": "array", "items": {"type": "string"},
+                                "description": "Assumptions made where evidence was incomplete, in Vietnamese; empty when none"},
+                "acceptance": {"type": "array", "items": {"type": "string"},
+                               "description": "1-3 observable, testable outcomes that prove the decision is implemented, "
+                                              "in Vietnamese"},
                 "confidence": {"type": "string", "enum": list(CONFIDENCES),
                                "description": "high: specs or code settle it; medium: inferred from existing patterns; "
                                               "low: a judgement call"},
+                "risk": {"type": "string", "enum": list(RISKS),
+                         "description": "Impact if this decision turns out wrong: LOW cosmetic or easy to change; "
+                                        "MEDIUM rework or a confusing workflow; HIGH security, grading or data integrity"},
                 "sources": {"type": "array", "items": {"type": "string"},
                             "description": "Files the decision rests on (path, path#section or path:line); empty when none"},
             }}},
@@ -219,8 +229,16 @@ QUESTIONS TO DECIDE
 """
 
 
+def decision_lines(item: dict) -> str:
+    """One answered question as the coder sees it: the answer plus the outcomes that prove it is done."""
+    text = f"- Q: {item['question']}\n  A: {item['answer']}"
+    if item.get('acceptance'):
+        text += '\n  Acceptance: ' + '; '.join(item['acceptance'])
+    return text
+
+
 def decisions_prompt(answers: list[dict], contract: str) -> str:
-    lines = '\n'.join(f"- Q: {item['question']}\n  A: {item['answer']}" for item in answers)
+    lines = '\n'.join(decision_lines(item) for item in answers)
     return f"""The product owner answered your questions. These answers are authoritative: implement accordingly in this same worktree, finish the remaining work, run the relevant checks and report again. Do not ask these questions again; ask only decisions that are genuinely new.
 {lines}
 
@@ -229,24 +247,36 @@ def decisions_prompt(answers: list[dict], contract: str) -> str:
 
 
 def decisions_report(decisions: list[dict]) -> str:
-    """The handoff section listing every decision the agent made, for the human to confirm."""
+    """The handoff section listing every decision the agent made, for the human to confirm; risky ones first."""
     labels = {'high': 'cao', 'medium': 'trung bình', 'low': 'thấp'}
+    risks = {'HIGH': 'cao', 'MEDIUM': 'trung bình', 'LOW': 'thấp'}
     stages = {'plan': 'lúc lập kế hoạch', 'report': 'khi agent code hỏi', 'manual': 'theo yêu cầu của bạn'}
-    lines, number = [], 0
-    for decision in decisions:
-        if decision.get('by') != 'agent':
-            continue
-        for item in decision.get('answers') or []:
-            number += 1
-            meta = f"Độ tin cậy: {labels.get(item.get('confidence'), item.get('confidence') or '?')}"
-            meta += f" · {stages.get(decision.get('stage'), decision.get('stage') or '')}"
-            if item.get('sources'):
-                meta += ' · Nguồn: ' + ', '.join(item['sources'])
-            lines.append(f"{number}. **{item['question']}**\n   - Quyết định: {item['answer']}"
-                         + (f"\n   - Lý do: {item['rationale']}" if item.get('rationale') else '')
-                         + f"\n   - {meta}")
-    if not lines:
+    items = [(decision, item) for decision in decisions if decision.get('by') == 'agent'
+             for item in decision.get('answers') or []]
+    if not items:
         return ''
+
+    def flagged(item: dict) -> bool:
+        return item.get('risk') == 'HIGH' or item.get('confidence') == 'low'
+
+    items.sort(key=lambda pair: not flagged(pair[1]))  # stable: otherwise in the order decided
+    lines = []
+    for number, (decision, item) in enumerate(items, 1):
+        meta = f"Độ tin cậy: {labels.get(item.get('confidence'), item.get('confidence') or '?')}"
+        if item.get('risk'):
+            meta += f" · Rủi ro: {risks.get(item['risk'], item['risk'])}"
+        meta += f" · {stages.get(decision.get('stage'), decision.get('stage') or '')}"
+        if item.get('sources'):
+            meta += ' · Nguồn: ' + ', '.join(item['sources'])
+        text = f"{number}. {'⚠️ ' if flagged(item) else ''}**{item['question']}**\n   - Quyết định: {item['answer']}"
+        if item.get('rationale'):
+            text += f"\n   - Lý do: {item['rationale']}"
+        if item.get('assumptions'):
+            text += '\n   - Giả định: ' + '; '.join(item['assumptions'])
+        if item.get('acceptance'):
+            text += '\n   - Nghiệm thu: ' + '; '.join(item['acceptance'])
+        lines.append(text + f"\n   - {meta}")
     return ('## Quyết định do agent đưa ra (cần bạn xác nhận)\n'
-            'Agent đã tự quyết các điểm dưới đây để hoàn thành task. Hãy xem lại; nếu sai, chạy lại task kèm ghi chú.\n\n'
+            'Agent đã tự quyết các điểm dưới đây để hoàn thành task. Mục ⚠️ (rủi ro cao hoặc độ tin cậy thấp) được xếp '
+            'lên đầu, nên xem trước. Nếu sai, chạy lại task kèm ghi chú.\n\n'
             + '\n'.join(lines))

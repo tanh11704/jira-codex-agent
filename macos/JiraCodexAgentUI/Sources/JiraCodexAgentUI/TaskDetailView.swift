@@ -172,11 +172,21 @@ struct TaskDetailView: View {
                                     if let rationale = item.rationale, !rationale.isEmpty {
                                         Text(rationale).font(.caption).foregroundStyle(.secondary)
                                     }
+                                    if let assumptions = item.assumptions, !assumptions.isEmpty {
+                                        Label(assumptions.joined(separator: "; "), systemImage: "questionmark.circle")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    if let acceptance = item.acceptance, !acceptance.isEmpty {
+                                        Label(acceptance.joined(separator: "; "), systemImage: "checkmark.circle")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                     if decision.isAgent {
-                                        let sources = (item.sources ?? []).joined(separator: ", ")
-                                        Text(sources.isEmpty ? item.confidenceLabel : item.confidenceLabel + " · " + sources)
+                                        let meta = [item.confidenceLabel, item.riskLabel ?? ""]
+                                            + (item.sources ?? [])
+                                        Label(meta.filter { !$0.isEmpty }.joined(separator: " · "),
+                                              systemImage: item.needsAttention ? "exclamationmark.triangle.fill" : "info.circle")
                                             .font(.caption2)
-                                            .foregroundStyle(item.confidence == "low" ? Color.orange : Color.secondary)
+                                            .foregroundStyle(item.needsAttention ? Color.orange : Color.secondary)
                                     }
                                 }
                             }

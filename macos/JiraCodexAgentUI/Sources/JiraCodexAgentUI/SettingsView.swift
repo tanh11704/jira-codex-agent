@@ -240,7 +240,7 @@ struct SettingsView: View {
             } header: {
                 Text("Decisions")
             } footer: {
-                Text("Instead of waiting for you, Claude answers the plan's open questions before Codex codes, and the questions Codex asks while coding, using the specs and the existing code; Codex then continues in the same session. Every decision, with its reason, confidence and sources, is listed at the end of the report and in the task details so you can check it. If one is wrong, retry the task with a note.")
+                Text("Instead of waiting for you, Claude answers the plan's open questions before Codex codes, and the questions Codex asks while coding, using the specs and the existing code; Codex then continues in the same session. Every decision, with its reason, assumptions, acceptance checks, confidence, risk and sources, is listed (high-risk and low-confidence ones first) at the end of the report and in the task details so you can check it. If one is wrong, retry the task with a note.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
