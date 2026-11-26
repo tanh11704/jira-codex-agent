@@ -46,6 +46,9 @@ MIGRATED_COLUMNS = {
     "decisions": "TEXT",  # human answers to Codex's questions, oldest first (JSON list)
     "declined_approvals": "TEXT",  # approvals declined because nobody answered in time (JSON list)
     "allowed_approvals": "TEXT",  # declined approvals a human allowed for later runs (JSON list)
+    # Who did each job: {role: {agent, model, effort, input_tokens, output_tokens, passes}} (JSON)
+    "agents": "TEXT",
+    "agent_sessions": "TEXT",  # CLI coding sessions to resume, by role: {backend|frontend: id} (JSON)
 }
 MAX_EVENT_CHARS = 8000
 
@@ -170,12 +173,13 @@ class Database:
         allowed = {"worktree", "session_id", "result", "error", "progress", "attempts", "next_attempt_at",
                    "report", "retry_note", "prompt", "blocked_reason", "plan", "review",
                    "claude_usage", "phase", "area", "claude_session_id", "backend_report", "decisions", "declined_approvals",
-                   "allowed_approvals"}
+                   "allowed_approvals", "agents", "agent_sessions"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"Unsupported fields: {sorted(invalid)}")
         values = {key: json.dumps(value) if key in ("result", "report", "review", "claude_usage", "decisions", "declined_approvals",
-                                     "allowed_approvals", "backend_report") and value is not None else value
+                                     "allowed_approvals", "backend_report", "agents", "agent_sessions")
+                  and value is not None else value
                   for key, value in fields.items()}
         values.update(state=state.value, updated_at=_now())
         assignments = ", ".join(f"{key} = ?" for key in values)
@@ -245,7 +249,8 @@ class Database:
                 """UPDATE tasks SET state=?, worktree=NULL, session_id=NULL, result=NULL, error=NULL,
                    progress=NULL, report=NULL, prompt=NULL, plan=NULL, review=NULL, claude_usage=NULL, phase=NULL, area=NULL,
                    claude_session_id=NULL, backend_report=NULL, decisions=NULL,
-                   declined_approvals=NULL, allowed_approvals=NULL, attempts=0, next_attempt_at=NULL,
+                   declined_approvals=NULL, allowed_approvals=NULL, agents=NULL, agent_sessions=NULL,
+                   attempts=0, next_attempt_at=NULL,
                    retry_note=?, updated_at=? WHERE issue_key=?""",
                 (state.value, retry_note, _now(), issue_key))
             if cursor.rowcount != 1:

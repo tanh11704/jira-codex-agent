@@ -113,24 +113,43 @@ Claude plan (read-only) → Codex implements → COMPLETED? → Claude review (r
   The dashboard shows Claude's quota next to Codex's.
 - If Claude is missing, low on quota or fails, Codex continues alone and the event appears in the task log.
 
-### Claude Code for frontend issues
+### Agents per job (Codex, Claude Code, Antigravity)
 
-With **Settings → Claude → Frontend** or `JCA_CLAUDE_FRONTEND=true`, Claude classifies each issue (as part of the plan, or
-in a short read-only pass when planning is off) and the work is routed by area:
+**Settings → Agents** picks the agent and model for each job; the switches turn the optional jobs on
+(`JCA_CLAUDE_PLAN`, `JCA_CLAUDE_REVIEW`, `JCA_CLAUDE_FRONTEND`, `JCA_CLAUDE_DECIDE`, names kept for existing configs):
+
+| Job | Agents | Default | Settings |
+|---|---|---|---|
+| Plan (read-only, also classifies the issue) | Claude, Antigravity | Claude · Opus | `JCA_PLAN_AGENT`, `JCA_PLAN_MODEL`, `JCA_PLAN_EFFORT` |
+| Backend (or the whole issue) | Codex, Claude Code, Antigravity | Codex · `JCA_CODEX_MODEL` / effort | `JCA_BACKEND_AGENT`, `_MODEL`, `_EFFORT` |
+| Frontend | Antigravity, Claude Code, Codex | Antigravity · Gemini 4 Hydrogen (High) | `JCA_FRONTEND_AGENT`, `_MODEL`, `_EFFORT` |
+| Review (read-only) | Claude, Antigravity | Claude | `JCA_REVIEW_AGENT`, `_MODEL`, `_EFFORT` |
+| Decisions (read-only) | Claude, Antigravity | Claude | `JCA_DECIDE_AGENT`, `_MODEL`, `_EFFORT` |
+
+An empty model uses the agent's default (`JCA_CLAUDE_MODEL`, `JCA_ANTIGRAVITY_MODEL`, `JCA_CODEX_MODEL`). Gemini 4 Hydrogen
+(High) is the default for UI work because it ranks highest on WebDev Arena among the models an Antigravity plan offers and
+uses less quota than XHigh.
+
+With frontend routing on, the planner (or a short read-only pass) classifies each issue:
 
 ```text
-frontend  → Claude Code implements (write access) → Needs review
-backend   → Codex implements → Claude review / Codex fixes → Needs review
-fullstack → Codex implements the backend → Claude review / Codex fixes → Claude Code builds the UI on top → Needs review
+frontend  → frontend agent implements → Needs review
+backend   → backend agent implements → review / fixes in the same session → Needs review
+fullstack → backend agent implements the server side → review / fixes → frontend agent builds the UI on top → Needs review
 ```
 
-- The coding pass may use `Edit`, `Write` and any shell command (builds, tests, dev server, screenshots) but not
-  history-changing git commands (`commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `switch`, `stash`). Unlike
-  Codex it runs without a sandbox, under your user account.
-- It follows the same task prompt and report contract as Codex, is bounded by `JCA_MAX_TASK_SECONDS` rather than
-  `JCA_CLAUDE_MAX_TURNS`, and its session is resumed after interruptions and human answers.
-- Claude's own frontend work is not reviewed by another agent; a human reviews it.
-- If classification fails or Claude's quota is reserved when the frontend is due, Codex implements it instead.
+- Every coder gets the same task prompt (including **UI QUALITY** and **VISUAL DESIGN AND IMAGERY**), the same report schema
+  with its `images` slots, local checks and decision rounds, and its session is resumed after interruptions and answers.
+- Claude Code and Antigravity edit the worktree directly, without Codex's sandbox, and may run any command except
+  history-changing git commands (`commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `switch`, `stash`; Antigravity
+  also `clean`). Read-only jobs may only read the worktree and run read-only git commands. Coding is bounded by
+  `JCA_MAX_TASK_SECONDS`.
+- Antigravity runs `agy --print` headless with `--output-format stream-json`, a JSON schema and per-run permission rules;
+  `JCA_ANTIGRAVITY_COMMAND` defaults to `~/.local/bin/agy`. Run `agy` once in Terminal to sign in.
+- Fallbacks: Claude's reserved quota, a missing CLI, or Antigravity reporting quota/rate-limit/sign-in errors when it
+  starts hands the work to the backend agent (or Codex). Frontend-only work by its own agent is reviewed by a human.
+- Each task records who did each job (`agents`: agent, model, effort, tokens, passes); the task details show it under
+  **Who did what**, e.g. `PLAN · Claude · Opus`, `BE · Codex · GPT-6.1 Sol · High`, `FE · Antigravity · Gemini 4 Hydrogen (High)`.
 
 ## Local checks (save agent tokens)
 

@@ -135,7 +135,7 @@ struct HumanDecision: Codable, Hashable {
     }
 }
 
-/// Structured final report Codex returns through the turn output schema.
+/// Structured final report the coding agent returns through the output schema.
 struct TaskReport: Codable, Hashable {
     let status: String
     let summary: String?
@@ -184,7 +184,7 @@ struct ClaudeFinding: Codable, Hashable {
     let fix: String
 }
 
-/// Claude's structured review of Codex's uncommitted changes.
+/// The review agent's structured review of the coder's uncommitted changes.
 struct ClaudeReview: Codable, Hashable {
     let verdict: String
     let summary: String?
@@ -233,11 +233,20 @@ struct AgentTask: Codable, Identifiable, Hashable {
     let decisions: String?
     let declinedApprovals: String?
     let allowedApprovals: String?
+    let agents: String?
 
     private func decode<T: Decodable>(_ value: String?, as type: T.Type) -> T? {
         guard let value, let data = value.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+
+    /// Who did each job, in pipeline order; jobs that never ran are absent.
+    var parsedAgents: [RoleCredit] {
+        let credits = decode(agents, as: [String: AgentCredit].self) ?? [:]
+        return AgentRole.allCases.compactMap { role in credits[role.rawValue].map { RoleCredit(role: role, credit: $0) } }
+    }
+
+    func credit(for role: AgentRole) -> AgentCredit? { parsedAgents.first { $0.role == role }?.credit }
 
     var parsedDecisions: [HumanDecision] { decode(decisions, as: [HumanDecision].self) ?? [] }
     var agentDecisionCount: Int { parsedDecisions.filter(\.isAgent).reduce(0) { $0 + $1.answers.count } }
@@ -275,7 +284,7 @@ struct AgentTask: Codable, Identifiable, Hashable {
             case "planning": return "Planning"
             case "reviewing": return "Reviewing"
             case "fixing": return "Fixing review"
-            case "frontend": return "Claude coding UI"
+            case "frontend": return "\(credit(for: .frontend)?.kind?.name ?? "Agent") coding UI"
             case "verifying": return "Running checks"
             case "deciding": return "Agent deciding"
             default: return "Coding"
@@ -332,7 +341,7 @@ struct AgentTask: Codable, Identifiable, Hashable {
         case issueKey = "issue_key"
         case summary, state, worktree
         case sessionId = "session_id"
-        case error, description, priority, attempts, report, plan, review, phase, decisions
+        case error, description, priority, attempts, report, plan, review, phase, decisions, agents
         case claudeUsage = "claude_usage"
         case declinedApprovals = "declined_approvals"
         case allowedApprovals = "allowed_approvals"

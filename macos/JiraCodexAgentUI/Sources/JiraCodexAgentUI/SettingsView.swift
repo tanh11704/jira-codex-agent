@@ -2,6 +2,7 @@ import SwiftUI
 
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case jira = "Jira"
+    case agents = "Agents"
     case codex = "Codex"
     case claude = "Claude"
     case automation = "Automation"
@@ -45,6 +46,7 @@ struct SettingsView: View {
             Divider()
             switch selectedTab {
             case .jira: jiraTab
+            case .agents: agentsTab
             case .codex: codexTab
             case .claude: claudeTab
             case .automation: automationTab
@@ -213,59 +215,8 @@ struct SettingsView: View {
     }
 
     private var claudeTab: some View {
-        let enabled = store.claudePlan || store.claudeReview || store.claudeFrontend || store.claudeDecide
+        let enabled = AgentRole.allCases.contains { store.isEnabled($0) && store.agent(for: $0) == .claude }
         return Form {
-            Section {
-                Toggle("Plan with Claude before Codex codes", isOn: $store.claudePlan)
-                Toggle("Review Codex's changes with Claude", isOn: $store.claudeReview)
-                Text("Claude Code runs read-only in the task worktree. The plan is added to the Codex prompt. When Codex reports COMPLETED, Claude reviews the diff; blocker or major findings go back to Codex, and if they remain the task moves to Needs you. If Claude is unavailable, Codex continues alone.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } header: {
-                Text("Claude passes")
-            }
-            Section {
-                Toggle("Let Claude Code implement frontend tasks", isOn: $store.claudeFrontend)
-            } header: {
-                Text("Frontend")
-            } footer: {
-                Text("Claude classifies each issue (in the plan, or a short extra pass). Frontend issues are coded by Claude Code with write access and go straight to Needs review. Full-stack issues are split: Codex codes the backend and Claude reviews it, then Claude Code builds the UI on top. Backend issues stay with Codex. If Claude's quota is reserved, Codex codes the frontend.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                Toggle("Let Claude decide open questions as product owner", isOn: $store.claudeDecide)
-                Stepper(store.claudeDecideRounds == 0 ? "Decision rounds after Codex asks: none (plan only)"
-                        : "Decision rounds after Codex asks: \(store.claudeDecideRounds)",
-                        value: $store.claudeDecideRounds, in: 0...5)
-                    .disabled(!store.claudeDecide)
-            } header: {
-                Text("Decisions")
-            } footer: {
-                Text("Instead of waiting for you, Claude answers the plan's open questions before Codex codes, and the questions Codex asks while coding, using the specs and the existing code; Codex then continues in the same session. Every decision, with its reason, assumptions, acceptance checks, confidence, risk and sources, is listed (high-risk and low-confidence ones first) at the end of the report and in the task details so you can check it. If one is wrong, retry the task with a note.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                TextEditor(text: $store.decidePrompt)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 180)
-                    .accessibilityLabel("Product owner prompt")
-            } header: {
-                HStack {
-                    Text("Product owner prompt")
-                    Spacer()
-                    Button("Restore default") { store.decidePrompt = AgentStore.defaultDecidePrompt }
-                        .buttonStyle(.borderless)
-                        .disabled(store.decidePrompt == AgentStore.defaultDecidePrompt)
-                }
-            } footer: {
-                Text("How Claude decides: its role, which evidence it trusts and what it prefers when judging. The issue, plan and questions are added automatically, as is the rule to answer every question by id. Applies after the daemon restarts. An empty prompt uses the default.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .disabled(!store.claudeDecide)
-            Section("Review") {
-                Stepper(store.claudeReviewRounds == 0 ? "Codex fix rounds: none (report only)" : "Codex fix rounds: \(store.claudeReviewRounds)",
-                        value: $store.claudeReviewRounds, in: 0...5)
-            }
-            .disabled(!store.claudeReview)
             Section {
                 Stepper("5 hours: \(store.claudeQuotaFiveHourThreshold)%", value: $store.claudeQuotaFiveHourThreshold, in: 0...100)
                 Stepper("7 days: \(store.claudeQuotaWeeklyThreshold)%", value: $store.claudeQuotaWeeklyThreshold, in: 0...100)
@@ -274,26 +225,28 @@ struct SettingsView: View {
             } header: {
                 Text("Skip Claude when remaining quota reaches")
             } footer: {
-                Text("Read from your plan's /usage before every pass, so the rest stays for your own Claude work. A skipped pass never stops the queue: Codex codes without the plan, or the task goes to review without Claude's review.")
+                Text("Read from your plan's /usage before every Claude pass, so the rest stays for your own Claude work. A skipped pass never stops the queue: the coder works without the plan, the review is skipped and the task waits for you, or Codex codes instead of Claude Code.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!enabled)
-            Section("Model") {
+            Section {
                 Picker("Model", selection: $store.claudeModel) {
                     Text("CLI default").tag("")
-                    Text("Opus").tag("opus")
-                    Text("Sonnet").tag("sonnet")
-                    Text("Fable").tag("fable")
-                    if !["", "opus", "sonnet", "fable"].contains(store.claudeModel) {
+                    ForEach(ModelNames.claudeAliases, id: \.0) { Text($0.1).tag($0.0) }
+                    if !([""] + ModelNames.claudeAliases.map(\.0)).contains(store.claudeModel) {
                         Text(store.claudeModel).tag(store.claudeModel)
                     }
                 }
                 Picker("Effort", selection: $store.claudeEffort) {
                     Text("Default").tag("")
-                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text($0.capitalized).tag($0) }
+                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text(ReasoningLevel.title($0)).tag($0) }
                 }
+            } header: {
+                Text("Default model")
+            } footer: {
+                Text("Used by Claude jobs that keep \"Default\" as their model in the Agents tab.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .disabled(!enabled)
             Section("Claude account") {
                 HStack {
                     Image(systemName: store.claudeStatus.hasPrefix("Connected") ? "checkmark.circle.fill" : "person.crop.circle.badge.exclamationmark")
@@ -308,6 +261,157 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .task { await store.checkClaudeLogin() }
     }
+
+    // MARK: Agents
+
+    private var agentsTab: some View {
+        Form {
+            Section {
+                ForEach(AgentRole.allCases) { role in
+                    RoleSummaryRow(role: role, agent: store.agent(for: role), summary: store.runSummary(for: role),
+                                   isEnabled: store.isEnabled(role))
+                }
+            } header: {
+                Text("Who does what")
+            } footer: {
+                Text("New tasks use these agents after the daemon restarts; a task that is interrupted continues with the agent that started each job. Every task records who did each job, shown under Who did what in its details.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            roleSection(.plan, footer: "Read-only. Explores the repository and writes the implementation plan, the issue's area (frontend, backend or full-stack) and open questions; the coder follows the plan. If the planner is unavailable, the coder plans alone.") {
+                Toggle("Plan before coding", isOn: $store.claudePlan)
+            }
+            roleSection(.backend, footer: "Implements the issue, or only its server side when frontend work goes to its own agent. Claude Code and Antigravity edit the worktree directly without Codex's sandbox and never commit; if they cannot run, Codex takes over.") {
+                EmptyView()
+            }
+            roleSection(.frontend, footer: "When on, each issue is classified: frontend issues go to this agent, full-stack issues are split (backend agent first, then this agent builds the UI on top), backend issues stay with the backend agent. It follows the same task prompt, including the UI quality and imagery rules, and reports every image slot. If it cannot run (quota, sign-in), the backend agent codes the UI instead.") {
+                Toggle("Send frontend work to its own agent", isOn: $store.claudeFrontend)
+                if store.claudeFrontend && store.agent(for: .frontend) == store.agent(for: .backend) {
+                    Label("Same agent as Backend: it codes whole issues and nothing is split.", systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            roleSection(.review, footer: "Read-only. Reviews the coder's diff and screenshots after it reports COMPLETED; blocker and major findings go back to the same coder session. If they remain after the allowed rounds, the task moves to Needs you. Frontend-only work by its own agent is left to your review.") {
+                Toggle("Review the coder's changes", isOn: $store.claudeReview)
+                Stepper(store.claudeReviewRounds == 0 ? "Fix rounds: none (report only)" : "Fix rounds: \(store.claudeReviewRounds)",
+                        value: $store.claudeReviewRounds, in: 0...5)
+                    .disabled(!store.claudeReview)
+            }
+            roleSection(.decide, footer: "Instead of waiting for you, answers the plan's open questions before coding and the questions the coder asks, using the specs and the existing code; the coder then continues in the same session. Every decision, with its reason, confidence, risk and sources, is listed at the end of the report for you to check. Its instructions are under Prompt → Product owner prompt.") {
+                Toggle("Decide open questions as product owner", isOn: $store.claudeDecide)
+                Stepper(store.claudeDecideRounds == 0 ? "Rounds after the coder asks: none (plan only)"
+                        : "Rounds after the coder asks: \(store.claudeDecideRounds)",
+                        value: $store.claudeDecideRounds, in: 0...5)
+                    .disabled(!store.claudeDecide)
+            }
+
+            Section {
+                HStack {
+                    Image(systemName: isAntigravityConnected ? "checkmark.circle.fill" : "person.crop.circle.badge.exclamationmark")
+                        .foregroundStyle(isAntigravityConnected ? .green : .orange)
+                    Text(store.antigravityStatus).lineLimit(2)
+                    Spacer()
+                    if store.isLoadingAntigravityModels {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Check") { Task { await store.checkAntigravity() } }
+                            .help("Run agy models to check the sign-in and load the models on your plan")
+                    }
+                }
+                TextField("Antigravity executable", text: $store.antigravityPath)
+                Picker("Default model", selection: $store.antigravityModel) {
+                    antigravityModelOptions(selected: store.antigravityModel)
+                }
+            } header: {
+                Text("Antigravity account")
+            } footer: {
+                Text("Runs the Antigravity CLI headless (agy --print) in the task worktree, signed in with your Antigravity plan; run agy once in Terminal to sign in. Read-only jobs may only read the worktree and run read-only git commands. Coding may edit the worktree and run any command except git commit, push, reset, rebase, merge, checkout, switch, stash and clean.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .task { if store.antigravityModels.isEmpty { await store.checkAntigravity() } }
+    }
+
+    private func roleSection<Switches: View>(_ role: AgentRole, footer: String,
+                                             @ViewBuilder switches: () -> Switches) -> some View {
+        let enabled = store.isEnabled(role)
+        let agent = store.agent(for: role)
+        return Section {
+            switches()
+            Picker("Agent", selection: agentBinding(role)) {
+                ForEach(role.agents) { kind in
+                    Label(kind.coderName, systemImage: kind.symbol).tag(kind)
+                }
+            }
+            .disabled(!enabled)
+            Group {
+                switch agent {
+                case .codex:
+                    LabeledContent("Model", value: store.codexRunSummary)
+                    Text("Codex uses the model, reasoning and speed from the Codex tab.")
+                        .font(.caption).foregroundStyle(.secondary)
+                case .claude:
+                    Picker("Model", selection: modelBinding(role)) {
+                        Text("Default (\(store.claudeModel.isEmpty ? "CLI default" : ModelNames.pretty(store.claudeModel, agent: .claude)))").tag("")
+                        ForEach(ModelNames.claudeAliases, id: \.0) { Text($0.1).tag($0.0) }
+                        let model = store.roleModels[role.rawValue] ?? ""
+                        if !([""] + ModelNames.claudeAliases.map(\.0)).contains(model) {
+                            Text(ModelNames.pretty(model, agent: .claude)).tag(model)
+                        }
+                    }
+                    Picker("Effort", selection: effortBinding(role)) {
+                        Text("Default").tag("")
+                        ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text(ReasoningLevel.title($0)).tag($0) }
+                    }
+                case .antigravity:
+                    Picker("Model", selection: modelBinding(role)) {
+                        Text("Default (\(ModelNames.pretty(store.antigravityModel, agent: .antigravity, catalog: store.antigravityModels)))").tag("")
+                        antigravityModelOptions(selected: store.roleModels[role.rawValue] ?? "")
+                    }
+                    if role == .frontend {
+                        Label("Gemini 4 Hydrogen (High) ranks highest for web UI among the models on your plan (WebDev Arena) and uses less quota than XHigh.",
+                              systemImage: "star.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if enabled && !isAntigravityConnected && !store.isLoadingAntigravityModels {
+                        Label("Antigravity is not ready: \(store.antigravityStatus)", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+            .disabled(!enabled)
+        } header: {
+            Label(role.title, systemImage: role.symbol)
+        } footer: {
+            Text(footer).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func antigravityModelOptions(selected: String) -> some View {
+        ForEach(store.antigravityModels) { option in
+            Text(option.displayName + (option.id == AgentStore.defaultAntigravityModel ? " — recommended for UI" : ""))
+                .tag(option.id)
+        }
+        if !selected.isEmpty && !store.antigravityModels.contains(where: { $0.id == selected }) {
+            Text(ModelNames.pretty(selected, agent: .antigravity)).tag(selected)
+        }
+    }
+
+    private func agentBinding(_ role: AgentRole) -> Binding<AgentKind> {
+        Binding(get: { store.agent(for: role) }, set: { store.setAgent($0, for: role) })
+    }
+
+    private func modelBinding(_ role: AgentRole) -> Binding<String> {
+        Binding(get: { store.roleModels[role.rawValue] ?? "" }, set: { store.roleModels[role.rawValue] = $0 })
+    }
+
+    private func effortBinding(_ role: AgentRole) -> Binding<String> {
+        Binding(get: { store.roleEfforts[role.rawValue] ?? "" }, set: { store.roleEfforts[role.rawValue] = $0 })
+    }
+
+    private var isAntigravityConnected: Bool { store.antigravityStatus.hasPrefix("Connected") }
 
     private var automationTab: some View {
         Form {
@@ -361,6 +465,24 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
+                TextEditor(text: $store.decidePrompt)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 180)
+                    .accessibilityLabel("Product owner prompt")
+            } header: {
+                HStack {
+                    Text("Product owner prompt")
+                    Spacer()
+                    Button("Restore default") { store.decidePrompt = AgentStore.defaultDecidePrompt }
+                        .buttonStyle(.borderless)
+                        .disabled(store.decidePrompt == AgentStore.defaultDecidePrompt)
+                }
+            } footer: {
+                Text("How the decision agent (Agents → Decisions) decides: its role, which evidence it trusts and what it prefers when judging. The issue, plan and questions are added automatically, as is the rule to answer every question by id. Applies after the daemon restarts. An empty prompt uses the default.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(!store.claudeDecide)
+            Section {
                 TextEditor(text: $store.verifyCommands)
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 90)
@@ -370,7 +492,7 @@ struct SettingsView: View {
             } header: {
                 Text("Local checks")
             } footer: {
-                Text("One shell command per line (e.g. pnpm install --frozen-lockfile, pnpm build, pnpm test), run in order in the task worktree after Codex or Claude reports COMPLETED. They run outside the agent sandbox, so Docker and Testcontainers work; a report that is incomplete only because the sandbox blocked checks is verified here and upgraded to COMPLETED when they pass. Agents are told not to run full builds themselves; on failure only the trimmed error output goes back to them. Lines starting with # are ignored. Leave empty to let agents run checks themselves.")
+                Text("One shell command per line (e.g. pnpm install --frozen-lockfile, pnpm build, pnpm test), run in order in the task worktree after the coding agent reports COMPLETED. They run outside the agent sandbox, so Docker and Testcontainers work; a report that is incomplete only because the sandbox blocked checks is verified here and upgraded to COMPLETED when they pass. Agents are told not to run full builds themselves; on failure only the trimmed error output goes back to them. Lines starting with # are ignored. Leave empty to let agents run checks themselves.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -537,5 +659,35 @@ private struct DotLabelStyle: LabelStyle {
             configuration.icon.font(.system(size: 6))
             configuration.title
         }
+    }
+}
+
+private struct RoleSummaryRow: View {
+    let role: AgentRole
+    let agent: AgentKind
+    let summary: String
+    let isEnabled: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: agent.symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isEnabled ? agent.tint : Color.secondary)
+                .frame(width: 30, height: 30)
+                .background((isEnabled ? agent.tint : Color.secondary).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(role.title).font(.caption).foregroundStyle(.secondary)
+                Text(isEnabled ? summary : "Off").font(.body.weight(isEnabled ? .semibold : .regular))
+                    .foregroundStyle(isEnabled ? Color.primary : Color.secondary)
+            }
+            Spacer()
+            Text(role.tag)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.quaternary.opacity(0.6), in: Capsule())
+        }
+        .padding(.vertical, 1)
+        .accessibilityElement(children: .combine)
     }
 }

@@ -278,6 +278,17 @@ final class AgentStore: ObservableObject {
     @Published var claudeQuotaWeeklyThreshold = 30
     @Published var claudeMaxTurns = 0
     @Published private(set) var claudeStatus = "Not checked"
+    /// agy lives in ~/.local/bin, which the daemon's PATH does not include, so the full path is saved.
+    @Published var antigravityPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/agy").path
+    @Published var antigravityModel = AgentStore.defaultAntigravityModel
+    @Published private(set) var antigravityStatus = "Not checked"
+    @Published private(set) var antigravityModels: [AntigravityModelOption] = []
+    @Published private(set) var isLoadingAntigravityModels = false
+    /// Agent, model and effort per job, keyed by AgentRole raw value.
+    @Published var roleAgents: [String: String] = Dictionary(uniqueKeysWithValues: AgentRole.allCases.map { ($0.rawValue, $0.defaultAgent.rawValue) })
+    @Published var roleModels: [String: String] = Dictionary(uniqueKeysWithValues: AgentRole.allCases.map { ($0.rawValue, $0.defaultModel) })
+    @Published var roleEfforts: [String: String] = [:]
+    static let defaultAntigravityModel = "gemini-4-hydrogen-high"
     @Published private(set) var availableModels: [CodexModelOption] = []
     @Published private(set) var modelCatalogError: String?
     @Published private(set) var isLoadingModels = false
@@ -491,6 +502,8 @@ final class AgentStore: ObservableObject {
             ("JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD", String(claudeQuotaFiveHourThreshold)),
             ("JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(claudeQuotaWeeklyThreshold)),
             ("JCA_CLAUDE_MAX_TURNS", String(claudeMaxTurns)),
+            ("JCA_ANTIGRAVITY_COMMAND", antigravityPath),
+            ("JCA_ANTIGRAVITY_MODEL", antigravityModel),
             ("JCA_SOCKET_PATH", socketPath),
             ("JCA_QUOTA_REMAINING_THRESHOLD", String(quotaFiveHourThreshold)),
             ("JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD", String(quotaWeeklyThreshold)),
@@ -500,7 +513,18 @@ final class AgentStore: ObservableObject {
             ("JCA_PREVENT_SLEEP", preventSleep ? "true" : "false"),
             ("JCA_NOTIFICATIONS", notificationsEnabled ? "true" : "false"),
         ]
-        return values.map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
+        return (values + roleConfiguration).map { "\($0.0)=\(dotenvQuoted($0.1))" }.joined(separator: "\n") + "\n"
+    }
+
+    private var roleConfiguration: [(String, String)] {
+        var values: [(String, String)] = []
+        for role in AgentRole.allCases {
+            let key = "JCA_" + role.rawValue.uppercased()
+            values.append((key + "_AGENT", agent(for: role).rawValue))
+            values.append((key + "_MODEL", roleModels[role.rawValue] ?? ""))
+            values.append((key + "_EFFORT", roleEfforts[role.rawValue] ?? ""))
+        }
+        return values
     }
 
     var hasUnsavedChanges: Bool { configurationContents != savedConfiguration }
@@ -578,6 +602,80 @@ final class AgentStore: ObservableObject {
                 return "Claude CLI not found"
             }
         }.value
+    }
+
+    // MARK: Agents per job
+
+    func agent(for role: AgentRole) -> AgentKind {
+        roleAgents[role.rawValue].flatMap(AgentKind.init(rawValue:)) ?? role.defaultAgent
+    }
+
+    /// A new agent understands none of the previous one's model names, so its own defaults apply.
+    func setAgent(_ agent: AgentKind, for role: AgentRole) {
+        guard agent != self.agent(for: role) else { return }
+        roleAgents[role.rawValue] = agent.rawValue
+        roleModels[role.rawValue] = agent == .claude && role == .plan ? "opus" : ""
+        roleEfforts[role.rawValue] = ""
+    }
+
+    /// Whether this job runs at all; backend always does, the others follow their switches.
+    func isEnabled(_ role: AgentRole) -> Bool {
+        switch role {
+        case .plan: return claudePlan
+        case .backend: return true
+        case .frontend: return claudeFrontend
+        case .review: return claudeReview
+        case .decide: return claudeDecide
+        }
+    }
+
+    /// e.g. "Claude · Opus · High" or "Codex · GPT-6.1 Sol · High", resolving empty values to the agent's defaults.
+    func runSummary(for role: AgentRole) -> String {
+        let agent = agent(for: role)
+        if agent == .codex { return "Codex · " + codexRunSummary }
+        let model = roleModels[role.rawValue] ?? ""
+        let effort = roleEfforts[role.rawValue] ?? ""
+        var parts = [agent.name]
+        switch agent {
+        case .claude:
+            let resolved = model.isEmpty ? claudeModel : model
+            parts.append(resolved.isEmpty ? "CLI default" : ModelNames.pretty(resolved, agent: .claude))
+            let level = effort.isEmpty ? claudeEffort : effort
+            if !level.isEmpty { parts.append(ReasoningLevel.title(level)) }
+        case .antigravity:
+            parts.append(ModelNames.pretty(model.isEmpty ? antigravityModel : model, agent: .antigravity,
+                                           catalog: antigravityModels))
+        case .codex:
+            break
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    func creditSummary(_ credit: AgentCredit) -> String {
+        guard let kind = credit.kind else { return credit.agent }
+        var parts = [kind.name]
+        if let model = credit.model, !model.isEmpty {
+            parts.append(ModelNames.pretty(model, agent: kind, catalog: antigravityModels, codex: availableModels))
+        } else {
+            parts.append(kind == .codex ? "default model" : "CLI default")
+        }
+        if let effort = credit.effort, !effort.isEmpty { parts.append(ReasoningLevel.title(effort)) }
+        return parts.joined(separator: " · ")
+    }
+
+    func checkAntigravity() async {
+        guard !isLoadingAntigravityModels else { return }
+        isLoadingAntigravityModels = true
+        antigravityStatus = "Checking…"
+        defer { isLoadingAntigravityModels = false }
+        do {
+            antigravityModels = try await AntigravityCatalog.load(executable: antigravityPath)
+            antigravityStatus = "Connected · \(antigravityModels.count) models on your plan"
+        } catch {
+            antigravityModels = []
+            antigravityStatus = FileManager.default.isExecutableFile(atPath: NSString(string: antigravityPath).expandingTildeInPath)
+                ? error.localizedDescription : "Antigravity CLI not found"
+        }
     }
 
     func loginCodex() {
@@ -663,6 +761,16 @@ final class AgentStore: ObservableObject {
         claudeQuotaFiveHourThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeQuotaWeeklyThreshold = min(100, max(0, Int(values["JCA_CLAUDE_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         claudeMaxTurns = max(0, Int(values["JCA_CLAUDE_MAX_TURNS"] ?? "0") ?? 0)
+        antigravityPath = values["JCA_ANTIGRAVITY_COMMAND"] ?? antigravityPath
+        antigravityModel = values["JCA_ANTIGRAVITY_MODEL"].flatMap { $0.isEmpty ? nil : $0 } ?? AgentStore.defaultAntigravityModel
+        for role in AgentRole.allCases {
+            let key = "JCA_\(role.rawValue.uppercased())"
+            if let saved = values["\(key)_AGENT"].flatMap(AgentKind.init(rawValue:)), role.agents.contains(saved) {
+                roleAgents[role.rawValue] = saved.rawValue
+            }
+            roleModels[role.rawValue] = values["\(key)_MODEL"] ?? role.defaultModel
+            roleEfforts[role.rawValue] = values["\(key)_EFFORT"] ?? ""
+        }
         socketPath = values["JCA_SOCKET_PATH"] ?? socketPath
         quotaFiveHourThreshold = min(100, max(0, Int(values["JCA_QUOTA_REMAINING_THRESHOLD"] ?? "30") ?? 30))
         quotaWeeklyThreshold = min(100, max(0, Int(values["JCA_QUOTA_WEEKLY_REMAINING_THRESHOLD"] ?? "30") ?? 30))

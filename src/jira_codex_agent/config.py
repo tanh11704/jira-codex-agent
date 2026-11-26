@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from jira_codex_agent.agents import DEFAULT_ANTIGRAVITY_MODEL, DEFAULT_PLAN_MODEL
+
 USER_CONFIG_PATH = Path("~/.config/jira-codex-agent/config.env").expanduser()
 DEFAULT_TASK_INSTRUCTIONS = (Path(__file__).parent / "default_task_prompt.txt").read_text(encoding="utf-8").strip()
 DEFAULT_DECIDE_INSTRUCTIONS = (Path(__file__).parent / "default_decide_prompt.txt").read_text(encoding="utf-8").strip()
@@ -124,8 +126,33 @@ class Settings(BaseSettings):
     claude_quota_weekly_remaining_threshold: int = Field(default=30, ge=0, le=100)
     claude_max_turns: int = Field(default=0, ge=0)  # per pass; 0 means no limit
 
+    # Antigravity CLI (agy): runs headless with --print; its models come from `agy models`.
+    # The installer puts agy in ~/.local/bin, which launchd's PATH lacks.
+    antigravity_command: str = str(_AGY) if (_AGY := Path('~/.local/bin/agy').expanduser()).exists() else "agy"
+    antigravity_model: str | None = DEFAULT_ANTIGRAVITY_MODEL  # default for roles that use Antigravity
+
+    # Who does each job. The claude_plan/review/frontend/decide switches above turn the passes on; these pick the agent.
+    # An empty model/effort uses that agent's default (claude_model, antigravity_model, codex_model).
+    plan_agent: Literal['claude', 'antigravity'] = 'claude'
+    plan_model: str | None = DEFAULT_PLAN_MODEL
+    plan_effort: str | None = None
+    backend_agent: Literal['codex', 'claude', 'antigravity'] = 'codex'
+    backend_model: str | None = None  # Codex always uses codex_model / codex_reasoning_effort
+    backend_effort: str | None = None
+    frontend_agent: Literal['antigravity', 'claude', 'codex'] = 'antigravity'
+    frontend_model: str | None = None
+    frontend_effort: str | None = None
+    review_agent: Literal['claude', 'antigravity'] = 'claude'
+    review_model: str | None = None
+    review_effort: str | None = None
+    decide_agent: Literal['claude', 'antigravity'] = 'claude'
+    decide_model: str | None = None
+    decide_effort: str | None = None
+
     @field_validator("codex_model", "codex_reasoning_effort", "codex_service_tier", "claude_model", "claude_effort",
-                     mode="before")
+                     "antigravity_model", "plan_model", "plan_effort", "backend_model", "backend_effort",
+                     "frontend_model", "frontend_effort", "review_model", "review_effort", "decide_model",
+                     "decide_effort", mode="before")
     @classmethod
     def normalize_model(cls, value: str | None) -> str | None:
         return value.strip() or None if value is not None else None

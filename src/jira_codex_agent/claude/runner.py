@@ -28,6 +28,10 @@ class ClaudeResult(BaseModel):
     session_id: str | None = None
     input_tokens: int = 0  # including cache reads and writes
     output_tokens: int = 0
+    model: str | None = None  # the model the CLI actually ran, when it reports one
+
+
+AgentResult = ClaudeResult  # shared by every headless CLI agent
 
 
 class ClaudeRunner:
@@ -39,7 +43,7 @@ class ClaudeRunner:
         self.max_turns = max_turns
 
     def arguments(self, schema: dict, *, write: bool = False, session_id: str | None = None,
-                  resume: str | None = None) -> list[str]:
+                  resume: str | None = None, model: str | None = None, effort: str | None = None) -> list[str]:
         args = [self.command, '-p', '--output-format', 'stream-json', '--verbose',
                 '--permission-mode', 'dontAsk', '--json-schema', json.dumps(schema)]
         if write:
@@ -50,10 +54,10 @@ class ClaudeRunner:
             args.extend(['--resume', resume])
         elif session_id:
             args.extend(['--session-id', session_id])
-        if self.model:
-            args.extend(['--model', self.model])
-        if self.effort:
-            args.extend(['--effort', self.effort])
+        if model := model or self.model:
+            args.extend(['--model', model])
+        if effort := effort or self.effort:
+            args.extend(['--effort', effort])
         if self.max_turns and not write:
             # Coding passes are bounded by the task time limit instead; a turn cap would cut them off mid-change.
             args.extend(['--max-turns', str(self.max_turns)])
@@ -62,11 +66,13 @@ class ClaudeRunner:
     async def run(self, prompt: str, cwd: Path, *, schema: dict,
                   on_event: Callable[[dict], None] | None = None, write: bool = False,
                   session_id: str | None = None, resume: str | None = None,
-                  timeout: int | None = None) -> ClaudeResult:
+                  timeout: int | None = None, model: str | None = None, effort: str | None = None,
+                  on_session: Callable[[str], None] | None = None) -> ClaudeResult:
         timeout = timeout or self.timeout
         try:
             process = await asyncio.create_subprocess_exec(
-                *self.arguments(schema, write=write, session_id=session_id, resume=resume), cwd=cwd,
+                *self.arguments(schema, write=write, session_id=session_id, resume=resume, model=model, effort=effort),
+                cwd=cwd,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True, limit=4 * 1024 * 1024)
         except OSError as exc:
@@ -77,6 +83,7 @@ class ClaudeRunner:
         process.stdin.close()
 
         final: dict = {}
+        started: dict = {}
         stderr_tail = bytearray()
 
         async def read_stdout() -> None:
@@ -87,6 +94,10 @@ class ClaudeRunner:
                     continue
                 if event.get('type') == 'result':
                     final.update(event)
+                elif event.get('type') == 'system' and event.get('subtype') == 'init':
+                    started.update(event)
+                    if on_session and event.get('session_id'):
+                        on_session(event['session_id'])
                 elif on_event:
                     for item in describe(event):
                         on_event(item)
@@ -122,7 +133,8 @@ class ClaudeRunner:
             await asyncio.gather(*readers, return_exceptions=True)
 
         usage = final.get('usage') or {}
-        meta = dict(session_id=final.get('session_id'), output_tokens=usage.get('output_tokens') or 0,
+        meta = dict(session_id=final.get('session_id'), model=started.get('model') or model or self.model,
+                    output_tokens=usage.get('output_tokens') or 0,
                     input_tokens=sum(usage.get(key) or 0 for key in (
                         'input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')))
         if not final or final.get('is_error') or final.get('subtype') != 'success':

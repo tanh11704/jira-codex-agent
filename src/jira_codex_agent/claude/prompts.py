@@ -123,26 +123,31 @@ This is a full-stack issue. Implement only the server-side part (APIs, data, mig
 """
 
 
-def frontend_scope(backend: dict | None) -> str:
-    if backend is None:
-        return """
+IMPLEMENTER_SCOPE = """
 YOU ARE THE IMPLEMENTER
 You are coding this issue yourself in this Git worktree: edit files directly, run the checks and the visual verification, then report.
 """
+
+
+def frontend_scope(backend: dict | None, backend_agent: str = 'Codex') -> str:
+    if backend is None:
+        return IMPLEMENTER_SCOPE
     tests = ', '.join(f"{t.get('command')} → {t.get('result')}" for t in backend.get('tests') or []) or 'none reported'
     return f"""
 YOU ARE THE IMPLEMENTER: FRONTEND PART
-This is a full-stack issue. Another agent (Codex) already implemented and verified the backend part; its changes are UNCOMMITTED in this worktree (see git status / git diff HEAD). Implement only the UI on top of them, edit files directly, run the checks and the visual verification, then report. Change backend code only when a defect blocks the UI, and explain it in the report.
+This is a full-stack issue. Another agent ({backend_agent}) already implemented and verified the backend part; its changes are UNCOMMITTED in this worktree (see git status / git diff HEAD). Implement only the UI on top of them, edit files directly, run the checks and the visual verification, then report. Change backend code only when a defect blocks the UI, and explain it in the report.
 Backend summary: {backend.get('summary', '')}
 Backend tests: {tests}
 """
 
 
-def merge_reports(backend: dict, frontend: dict) -> dict:
+def merge_reports(backend: dict, frontend: dict, backend_agent: str = 'Codex',
+                  frontend_agent: str = 'Claude Code') -> dict:
     """One handoff for a split issue: the frontend outcome decides, the backend notes stay readable."""
     return {**frontend, 'tests': (backend.get('tests') or []) + (frontend.get('tests') or []),
             'blockers': (backend.get('blockers') or []) + (frontend.get('blockers') or []),
-            'report': f"## Backend (Codex)\n{backend.get('report', '')}\n\n## Frontend (Claude Code)\n{frontend.get('report', '')}"}
+            'report': f"## Backend ({backend_agent})\n{backend.get('report', '')}\n\n"
+                      f"## Frontend ({frontend_agent})\n{frontend.get('report', '')}"}
 
 
 def plan_markdown(plan: dict) -> str:
@@ -162,12 +167,12 @@ Follow it unless the code proves a step wrong; then deviate and explain why in t
 """
 
 
-def review_prompt(task: str, plan: str | None, report: dict) -> str:
+def review_prompt(task: str, plan: str | None, report: dict, coder: str = 'Codex') -> str:
     plan_text = f"\nThe agreed implementation plan:\n{plan}\n" if plan else ''
     screenshots = '\n'.join(f'- {path}' for path in report.get('screenshots') or []) or '- (none)'
     images = '\n'.join(f"- {item.get('placement')} [{item.get('source')}] {item.get('path')} {item.get('aspect_ratio')}: "
                        f"{item.get('url') or item.get('prompt')}" for item in report.get('images') or []) or '- (none)'
-    return f"""You are the code reviewer for an autonomous Jira implementation. A coding agent (Codex) left UNCOMMITTED changes in this Git worktree and reported them COMPLETED. Review them before a human does.
+    return f"""You are the code reviewer for an autonomous Jira implementation. A coding agent ({coder}) left UNCOMMITTED changes in this Git worktree and reported them COMPLETED. Review them before a human does.
 
 Inspect the change read-only: git status --short, git diff HEAD, and read every untracked file it lists. Read surrounding code and project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md) as needed. Do not modify any file.
 Check: acceptance criteria coverage, correctness and edge cases, authorization/tenant/data-safety, contract and migration drift, missing or weakened tests, rule violations, unrelated changes and leftovers. Be specific: give location, the problem and the fix.
@@ -177,13 +182,13 @@ When the diff touches UI (components, pages, styles), review it as a user would 
 - Read the markup and classes for causes screenshots can miss: fixed widths on controls inside grid/flex cells, grid/flex children holding inputs without min-w-0, field rows that never stack on narrow widths, absolute positioning or negative margins that can collide, and raw elements bypassing shared primitives.
 - Every clickable element needs cursor-pointer plus distinct hover, active and focus-visible states; disabled must look disabled; async actions need a pending state and visible success/error feedback. A main action without hover/pending feedback is a major finding.
 - Imagery and visual richness: a learner- or parent-facing screen that is a plain wall of text or bare form, with no hierarchy, icons or cards, is a minor finding (major when the issue asks for a designed screen). An image URL that looks guessed or unverified, a web image without a license, a photo of an identifiable person, an image without a fixed aspect ratio or missing-file fallback, missing alt text, or an image slot in the code that is not listed in the report is a major finding. Check generation prompts are specific, in English, match the slot's aspect ratio and share one style.
-- UI changes with no screenshots and no stated reason are a major finding; when Codex reported the visual check BLOCKED with a reason, note it as minor so the human checks it manually.
+- UI changes with no screenshots and no stated reason are a major finding; when the coder reported the visual check BLOCKED with a reason, note it as minor so the human checks it manually.
 
 Severity: blocker/major must be fixed before human review; minor/nit are suggestions. Verdict is REQUEST_CHANGES only when at least one blocker or major finding exists, otherwise APPROVE. Write findings in English.
 
 {task}
 {plan_text}
-Codex's report:
+{coder}'s report:
 Summary: {report.get('summary', '')}
 Tests: {', '.join(f"{t.get('command')} → {t.get('result')}" for t in report.get('tests') or []) or 'none reported'}
 Screenshots (worktree-relative):

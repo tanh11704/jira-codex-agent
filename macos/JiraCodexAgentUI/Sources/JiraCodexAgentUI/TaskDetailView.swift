@@ -136,6 +136,19 @@ struct TaskDetailView: View {
                         Link("Open in Jira", destination: url).font(.caption)
                     }
                 }
+                if !task.parsedAgents.isEmpty {
+                    section("Who did what") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(task.parsedAgents, id: \.role) { item in
+                                AgentCreditRow(role: item.role, credit: item.credit,
+                                               summary: store.creditSummary(item.credit))
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
                 if let reason = task.blockedReason {
                     callout("Blocked in Jira", reason, symbol: "lock.fill", color: .purple)
                 }
@@ -204,7 +217,7 @@ struct TaskDetailView: View {
                     callout("Note for this attempt", note, symbol: "text.bubble", color: .blue)
                 }
                 if let report = task.parsedReport {
-                    section("Codex report — \(report.status)") {
+                    section("\(coderTitle) report — \(report.status)") {
                         if let summary = report.summary, !summary.isEmpty { Text(summary) }
                         if let branch = report.branch, !branch.isEmpty {
                             Label(branch, systemImage: "arrow.triangle.branch").font(.caption.monospaced())
@@ -241,7 +254,7 @@ struct TaskDetailView: View {
                     }
                 }
                 if let review = task.parsedReview {
-                    section("Claude review") {
+                    section("\(agentName(.review)) review") {
                         let approved = review.verdict == "APPROVE"
                         Label(approved ? "Approved" : "Changes requested",
                               systemImage: approved ? "checkmark.seal.fill" : "exclamationmark.bubble.fill")
@@ -265,7 +278,7 @@ struct TaskDetailView: View {
                     }
                 }
                 if let plan = task.plan, !plan.isEmpty {
-                    section("Claude plan", accessory: {
+                    section("\(agentName(.plan)) plan", accessory: {
                         expandButton("Expand") { openReader(.plan) }
                     }) {
                         DisclosureGroup("Implementation plan") {
@@ -298,6 +311,17 @@ struct TaskDetailView: View {
         }
         .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45)))
+    }
+
+    /// Who wrote the report: one coder, or e.g. "Codex + Antigravity" for a split full-stack issue.
+    private var coderTitle: String {
+        let names = [AgentRole.backend, .frontend].compactMap { task.credit(for: $0)?.kind?.coderName }
+        let unique = names.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        return unique.isEmpty ? "Agent" : unique.joined(separator: " + ")
+    }
+
+    private func agentName(_ role: AgentRole) -> String {
+        task.credit(for: role)?.kind?.name ?? "Claude"
     }
 
     private func openReader(_ section: ReaderRequest.Section) {
@@ -338,7 +362,45 @@ struct TaskDetailView: View {
     }
 }
 
-/// Answers Codex's questions and allows declined requests, then resumes the same session and worktree.
+/// One job on the task: which agent and model did it, and what it cost.
+private struct AgentCreditRow: View {
+    let role: AgentRole
+    let credit: AgentCredit
+    let summary: String
+
+    private var tokens: String? {
+        let total = (credit.inputTokens ?? 0) + (credit.outputTokens ?? 0)
+        guard total > 0 else { return nil }
+        return total.formatted(.number.notation(.compactName)) + " tokens"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(role.tag, systemImage: role.symbol)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+            Image(systemName: credit.kind?.symbol ?? "cpu")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(credit.kind?.tint ?? .secondary)
+                .frame(width: 22, height: 22)
+                .background((credit.kind?.tint ?? .secondary).opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            Text(summary).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 8)
+            if (credit.passes ?? 0) == 0 {
+                Text("In progress").font(.caption).foregroundStyle(.secondary)
+            } else if let tokens {
+                Text(tokens).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                    .help("\(credit.passes ?? 0) pass(es) · \((credit.inputTokens ?? 0).formatted()) input / "
+                          + "\((credit.outputTokens ?? 0).formatted()) output tokens")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(role.title): \(summary)")
+    }
+}
+
+/// Answers the coder's questions and allows declined requests, then resumes the same session and worktree.
 struct AnswerPanel: View {
     @EnvironmentObject private var store: AgentStore
     let task: AgentTask
@@ -397,11 +459,11 @@ struct AnswerPanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            TextField(questions.isEmpty ? "Tell Codex how to continue" : "Additional note (optional)",
+            TextField(questions.isEmpty ? "Tell the agent how to continue" : "Additional note (optional)",
                       text: $note, axis: .vertical)
                 .lineLimit(1...4)
             HStack {
-                Text("Resumes the same Codex session and worktree.").font(.caption).foregroundStyle(.secondary)
+                Text("Resumes the same agent session and worktree.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !questions.isEmpty {
                     Button(isDeciding ? "Agent deciding…" : "Let agent decide") {
@@ -410,7 +472,7 @@ struct AnswerPanel: View {
                             if !(await store.decideTask(task)) { isDeciding = false }
                         }
                     }
-                    .help("Claude answers these questions as product owner and resumes the task; you review its decisions at the end")
+                    .help("The decision agent answers these questions as product owner and resumes the task; you review its decisions at the end")
                     .disabled(isDeciding || isSending)
                 }
                 Button(isSending ? "Sending…" : "Answer & resume") { Task { await send() } }

@@ -7,6 +7,7 @@ import fcntl
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from jira_codex_agent.antigravity.runner import AntigravityRunner
 from jira_codex_agent.claude.quota import ClaudeQuotaReader
 from jira_codex_agent.claude.runner import ClaudeRunner
 from jira_codex_agent.codex.quota import QuotaReader
@@ -190,6 +191,7 @@ async def run_daemon(settings: Settings | None = None) -> None:
     control = ControlServer(settings.socket_path, database)
     server = await control.start()
     jira = JiraClient(settings.jira_url, settings.jira_email, settings.jira_api_token.get_secret_value())
+    agents = agents_in_use(settings)
     orchestrator = Orchestrator(
         settings,
         database,
@@ -205,10 +207,10 @@ async def run_daemon(settings: Settings | None = None) -> None:
         notify=Notifier(settings.notifications),
         sleep_guard=SleepGuard(settings.prevent_sleep),
         claude=ClaudeRunner(settings.claude_command, settings.claude_model, settings.claude_effort,
-                            settings.claude_timeout_seconds, settings.claude_max_turns)
-        if settings.claude_plan or settings.claude_review or settings.claude_frontend or settings.claude_decide else None,
-        claude_quota=ClaudeQuotaReader(settings.claude_command, cwd=settings.data_dir)
-        if settings.claude_plan or settings.claude_review or settings.claude_frontend or settings.claude_decide else None,
+                            settings.claude_timeout_seconds, settings.claude_max_turns) if 'claude' in agents else None,
+        claude_quota=ClaudeQuotaReader(settings.claude_command, cwd=settings.data_dir) if 'claude' in agents else None,
+        antigravity=AntigravityRunner(settings.antigravity_command, settings.antigravity_model,
+                                      settings.claude_timeout_seconds) if 'antigravity' in agents else None,
     )
     control.orchestrator = orchestrator
     try:
@@ -218,6 +220,20 @@ async def run_daemon(settings: Settings | None = None) -> None:
         await jira.close()
         settings.socket_path.unlink(missing_ok=True)
         daemon_lock.close()
+
+
+def agents_in_use(settings: Settings) -> set[str]:
+    """CLI agents some enabled job needs; classification for frontend routing is done by the planning agent."""
+    roles = {'backend'}
+    if settings.claude_plan:
+        roles.add('plan')
+    if settings.claude_review:
+        roles.add('review')
+    if settings.claude_decide:
+        roles.add('decide')
+    if settings.claude_frontend:
+        roles |= {'plan', 'frontend'}
+    return {getattr(settings, f'{role}_agent') for role in roles}
 
 
 def main() -> None:

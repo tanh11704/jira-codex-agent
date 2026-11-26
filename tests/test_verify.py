@@ -72,13 +72,13 @@ async def test_check_still_failing_after_rounds_goes_to_human(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_claude_frontend_fixes_failed_check_in_its_session(tmp_path, monkeypatch):
     db, orchestrator, _ = setup(tmp_path, [classified('frontend'), FRONTEND_REPORT, FRONTEND_REPORT], [],
-                                claude_frontend=True, verify_commands=['npm run build'], verify_fix_rounds=1)
+                                claude_frontend=True, frontend_agent='claude', verify_commands=['npm run build'], verify_fix_rounds=1)
     _, fake = checks(orchestrator, 'npm run build', True)
     monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', fake)
     await orchestrator.process(issue())
     task = db.get_task('TM-1')
     fix = orchestrator.claude.run.await_args_list[2]
-    assert fix.kwargs['resume'] == task['claude_session_id'] and 'npm run build → FAIL' in fix.args[0]
+    assert fix.kwargs['resume'] == json.loads(task['agent_sessions'])['frontend'] and 'npm run build → FAIL' in fix.args[0]
     assert task['state'] == 'review'
 
 

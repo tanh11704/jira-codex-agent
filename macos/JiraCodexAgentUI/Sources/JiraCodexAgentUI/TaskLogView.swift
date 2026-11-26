@@ -9,7 +9,7 @@ struct TaskLogView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("Codex logs", systemImage: "terminal").font(.headline)
+                Label("Agent logs", systemImage: "terminal").font(.headline)
                 if let task = store.selectedTaskID ?? store.currentTask?.issueKey {
                     Text(task).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
@@ -22,11 +22,11 @@ struct TaskLogView: View {
                 Button { isExpanded.toggle() } label: {
                     Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
-                .help(isExpanded ? "Collapse Codex logs" : "Expand Codex logs")
-                .accessibilityLabel(isExpanded ? "Collapse Codex logs" : "Expand Codex logs")
+                .help(isExpanded ? "Collapse agent logs" : "Expand agent logs")
+                .accessibilityLabel(isExpanded ? "Collapse agent logs" : "Expand agent logs")
                 Button { isShowingLogs = false; isExpanded = false } label: {
                     Image(systemName: "xmark")
-                }.help("Hide Codex logs")
+                }.help("Hide agent logs")
             }.padding(12)
             Divider()
             ScrollViewReader { proxy in
@@ -35,7 +35,7 @@ struct TaskLogView: View {
                         if let error = store.logError {
                             Text("Logs unavailable: \(error)").foregroundStyle(.red)
                         } else if store.logEvents.isEmpty {
-                            Text("Select a task to view its recorded Codex activity. Logs start after the daemon is updated.")
+                            Text("Select a task to view its recorded agent activity. Logs start after the daemon is updated.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(store.logEvents) { event in

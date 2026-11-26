@@ -197,13 +197,13 @@ def classified(area):
 @pytest.mark.asyncio
 async def test_frontend_issue_is_coded_by_claude_and_skips_review(tmp_path):
     db, orchestrator, prompts = setup(tmp_path, [classified('frontend'), FRONTEND_REPORT], [],
-                                      claude_frontend=True, claude_review=True, max_task_seconds=3600)
+                                      claude_frontend=True, frontend_agent='claude', claude_review=True, max_task_seconds=3600)
     await orchestrator.process(issue())
     task = db.get_task('TM-1')
     assert prompts == [] and task['state'] == 'review' and task['area'] == 'frontend' and task['phase'] == 'frontend'
     coding = orchestrator.claude.run.await_args_list[1]
     assert coding.kwargs['write'] is True and coding.kwargs['timeout'] == 3600
-    assert coding.kwargs['session_id'] == task['claude_session_id']
+    assert coding.kwargs['session_id'] == json.loads(task['agent_sessions'])['frontend']
     assert 'YOU ARE THE IMPLEMENTER' in coding.args[0] and 'Do it well.' in coding.args[0]
     assert json.loads(task['report'])['screenshots'] == ['.ui-evidence/a.png']
 
@@ -211,7 +211,7 @@ async def test_frontend_issue_is_coded_by_claude_and_skips_review(tmp_path):
 @pytest.mark.asyncio
 async def test_backend_issue_stays_with_codex(tmp_path):
     db, orchestrator, prompts = setup(tmp_path, [classified('backend'), APPROVE], [COMPLETED],
-                                      claude_frontend=True, claude_review=True)
+                                      claude_frontend=True, frontend_agent='claude', claude_review=True)
     await orchestrator.process(issue())
     assert len(prompts) == 1 and 'BACKEND ONLY' not in prompts[0]
     assert db.get_task('TM-1')['state'] == 'review' and orchestrator.claude.run.await_count == 2
@@ -220,7 +220,7 @@ async def test_backend_issue_stays_with_codex(tmp_path):
 @pytest.mark.asyncio
 async def test_fullstack_issue_splits_backend_codex_review_then_claude_frontend(tmp_path):
     db, orchestrator, prompts = setup(tmp_path, [{**PLAN, 'area': 'fullstack'}, APPROVE, FRONTEND_REPORT], [BACKEND_DONE],
-                                      claude_plan=True, claude_frontend=True, claude_review=True)
+                                      claude_plan=True, claude_frontend=True, frontend_agent='claude', claude_review=True)
     await orchestrator.process(issue())
     task = db.get_task('TM-1')
     calls = orchestrator.claude.run.await_args_list
@@ -235,14 +235,14 @@ async def test_fullstack_issue_splits_backend_codex_review_then_claude_frontend(
 @pytest.mark.asyncio
 async def test_fullstack_backend_with_unresolved_review_never_reaches_frontend(tmp_path):
     db, orchestrator, _ = setup(tmp_path, [classified('fullstack'), CHANGES], [BACKEND_DONE],
-                                claude_frontend=True, claude_review=True, claude_review_rounds=0)
+                                claude_frontend=True, frontend_agent='claude', claude_review=True, claude_review_rounds=0)
     await orchestrator.process(issue())
     assert db.get_task('TM-1')['state'] == 'needs_human' and orchestrator.claude.run.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_frontend_falls_back_to_codex_when_claude_quota_is_reserved(tmp_path):
-    db, orchestrator, prompts = setup(tmp_path, [classified('frontend')], [COMPLETED], claude_frontend=True)
+    db, orchestrator, prompts = setup(tmp_path, [classified('frontend')], [COMPLETED], claude_frontend=True, frontend_agent='claude')
     orchestrator._claude_quota_blocked = AsyncMock(side_effect=[None, 'Claude 5-hour quota at 10% remaining'])
     await orchestrator.process(issue())
     assert len(prompts) == 1 and 'IMPLEMENTER' not in prompts[0] and db.get_task('TM-1')['state'] == 'review'
@@ -250,7 +250,7 @@ async def test_frontend_falls_back_to_codex_when_claude_quota_is_reserved(tmp_pa
 
 @pytest.mark.asyncio
 async def test_interrupted_frontend_resumes_the_claude_session(tmp_path):
-    db, orchestrator, prompts = setup(tmp_path, [FRONTEND_REPORT], [], claude_frontend=True)
+    db, orchestrator, prompts = setup(tmp_path, [FRONTEND_REPORT], [], claude_frontend=True, frontend_agent='claude')
     db.update_task('TM-1', TaskState.INTERRUPTED, worktree=str(tmp_path), phase='frontend', area='frontend',
                    claude_session_id='s-1')
     await orchestrator.process(issue(), resume=db.get_task('TM-1'))

@@ -7,12 +7,16 @@ import signal
 import subprocess
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, DECIDE_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA,
-                                             RISKS, classify_prompt, decide_prompt, decision_lines, decisions_prompt,
+from jira_codex_agent.agents import AGENT_NAMES, CODER_NAMES, DEFAULT_AGENTS
+from jira_codex_agent.antigravity.runner import AntigravityRunner, unavailable
+from jira_codex_agent.claude.prompts import (BACKEND_SCOPE, CLASSIFY_SCHEMA, DECIDE_SCHEMA, IMPLEMENTER_SCOPE, PLAN_SCHEMA,
+                                             REVIEW_SCHEMA, RISKS, classify_prompt, decide_prompt, decision_lines, decisions_prompt,
                                              decisions_report,
                                              findings_text, fix_prompt, frontend_scope, merge_reports, plan_markdown,
                                              plan_prompt, plan_section, review_prompt)
@@ -37,6 +41,21 @@ log = logging.getLogger(__name__)
 # Keep the Mac awake through quota waits up to this long; longer waits let it sleep.
 MAX_AWAKE_QUOTA_WAIT = 6 * 3600
 PRUNE_INTERVAL = 3600
+# Which agent's settings describe a pass; classification is part of planning.
+PASS_ROLES = {'classify': 'plan'}
+
+
+@dataclass
+class Coder:
+    """An agent that writes code in the worktree. start() returns None when the agent cannot run now."""
+    agent: str
+    roles: tuple[str, ...]  # jobs credited to it: backend, frontend or both
+    start: Callable[[str], Awaitable[CodexRunResult | None]]
+    fix: Callable[[str, CodexRunResult], Awaitable[CodexRunResult]]
+
+    @property
+    def name(self) -> str:
+        return CODER_NAMES[self.agent]
 
 
 class Orchestrator:
@@ -53,6 +72,7 @@ class Orchestrator:
         sleep_guard: SleepGuard | None = None,
         claude: ClaudeRunner | None = None,
         claude_quota: ClaudeQuotaReader | None = None,
+        antigravity: AntigravityRunner | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -62,6 +82,7 @@ class Orchestrator:
         self.worktrees = worktrees
         self.claude = claude
         self.claude_quota = claude_quota
+        self.antigravity = antigravity
         self.notify = notify or (lambda title, message: None)
         self.sleep_guard = sleep_guard or SleepGuard(enabled=False)
         self.stop_event = asyncio.Event()
@@ -204,8 +225,8 @@ class Orchestrator:
         # A resumed run keeps the plan and routing it started with; worktree changes would skew new ones.
         plan = task.get('plan') if resume else None
         area = task.get('area') if resume else None
-        claude_codes_ui = bool(self.claude and self._setting('claude_frontend', False))
-        if not resume and self.claude and self._setting('claude_plan', False):
+        split = self._splits_frontend()
+        if not resume and self._setting('claude_plan', False) and self._available('plan'):
             self.database.update_task(issue.key, TaskState.CODING, phase='planning')
             finished, planned = await self._guarded(issue.key, self._plan(issue, task, worktree))
             if not finished:
@@ -216,40 +237,139 @@ class Orchestrator:
                 if not finished:
                     return
                 task = self.database.get_task(issue.key) or task
-        if not resume and claude_codes_ui and area is None:
+        if not resume and split and area is None and self._available('plan'):
             self.database.update_task(issue.key, TaskState.CODING, phase='planning')
             finished, area = await self._guarded(issue.key, self._classify(issue, task, worktree))
             if not finished:
                 return
 
-        if claude_codes_ui and (task.get('phase') == 'frontend' if resume else area == 'frontend'):
+        if split and (task.get('phase') == 'frontend' if resume else area == 'frontend'):
             backend = json.loads(task['backend_report']) if resume and task.get('backend_report') else None
             finished, result = await self._guarded(issue.key, self._code_frontend(
-                issue, task, worktree, plan, backend, resume=bool(resume), codex_session=session_id))
+                issue, task, worktree, plan, backend, resume=bool(resume),
+                codex_session=session_id, backend_agent=self._agent_for(task, 'backend')))
             if not finished:
                 return
             if result is not None:
                 self._finish(issue.key, result)
                 return
             if resume:
-                # Resumed frontend work waits for Claude rather than restarting it in a Codex session that never saw it.
-                self._attempt_failed(issue.key, 'Claude Code unavailable to continue the frontend work')
+                # Resumed frontend work waits for its agent rather than restarting it with one that never saw it.
+                self._attempt_failed(issue.key, f"{CODER_NAMES[self._agent_for(task, 'frontend')]} unavailable "
+                                                'to continue the frontend work')
                 return
-            area = None  # Claude cannot code now; Codex implements the whole issue.
+            split = False  # The frontend agent cannot code now; the backend agent implements the whole issue.
 
-        split = claude_codes_ui and area == 'fullstack'
-        scope = BACKEND_SCOPE if split else ''
-        prompt = self._prompt(issue, task, plan, scope)
+        fullstack = split and area == 'fullstack'
+        scope = BACKEND_SCOPE if fullstack else ''
+        roles = ('backend',) if fullstack or area == 'backend' or area is None else (
+            ('frontend',) if area == 'frontend' else ('backend', 'frontend'))
+        coder = await self._backend_coder(issue, task, worktree, resume=bool(resume), codex_session=session_id,
+                                          roles=roles)
+        prompt = self._prompt(issue, task, plan, scope + ('' if coder.agent == 'codex' else IMPLEMENTER_SCOPE))
         if resume:
-            prompt = self._resume_preamble(task) + prompt
+            prompt = self._resume_preamble(task, approvals=coder.agent == 'codex') + prompt
         self.database.update_task(issue.key, TaskState.CODING, prompt=prompt, phase='coding')
-        self.database.append_event(issue.key, 'lifecycle', 'Resuming Codex session' if resume else 'Starting Codex task')
+        self.database.append_event(issue.key, 'lifecycle', f'Resuming {coder.name} session' if resume
+                                   else f'Starting {coder.name} task')
 
+        async def code() -> CodexRunResult:
+            nonlocal coder
+            first = await coder.start(prompt)
+            if first is None:
+                self.database.append_event(issue.key, 'lifecycle', f'{coder.name} unavailable; Codex implements it instead')
+                coder = self._codex_coder(issue.key, task, worktree, session_id, roles)
+                first = await coder.start(self._prompt(issue, task, plan, scope))
+            verified = await self._verify(issue.key, worktree, first, coder.fix, coder.name)
+            return await self._settle(issue, worktree, plan, verified, coder.fix, coder.name, scope)
+
+        finished, result = await self._guarded(issue.key, code())
+        if not finished:
+            return
+        review, review_skipped = None, None
+        if self._setting('claude_review', False) and self._available('review'):
+            finished, reviewed = await self._guarded(issue.key, self._review_loop(issue, task, worktree, plan, result,
+                                                                                  coder, scope))
+            if not finished:
+                return
+            result, review, review_skipped = reviewed
+        backend = parse_report(result.final_message) if fullstack and result.outcome == RunOutcome.SUCCEEDED else None
+        if backend and backend['status'] == 'COMPLETED' and not (review and review.get('verdict') == 'REQUEST_CHANGES'):
+            finished, frontend = await self._guarded(issue.key, self._frontend_after_backend(
+                issue, task, worktree, plan, backend, result, coder))
+            if not finished:
+                return
+            result = frontend
+        if self._finish(issue.key, result, review, review_skipped) == TaskState.REVIEW:
+            await self._respect_quota()
+
+    # Agents and roles
+
+    def _role(self, role: str) -> dict:
+        """The agent, model and effort configured for a job; empty model/effort fall back to the agent's defaults."""
+        role = PASS_ROLES.get(role, role)
+        agent = self._setting(f'{role}_agent', None) or DEFAULT_AGENTS[role]
+        if agent == 'codex':
+            return {'agent': 'codex', 'model': self._setting('codex_model', None),
+                    'effort': self._setting('codex_reasoning_effort', None)}
+        model = self._setting(f'{role}_model', None) or self._setting(f'{agent}_model', None)
+        effort = self._setting(f'{role}_effort', None) or self._setting(f'{agent}_effort', None)
+        return {'agent': agent, 'model': model or None, 'effort': effort or None}
+
+    def _runner_for(self, agent: str):
+        return {'claude': self.claude, 'antigravity': self.antigravity}.get(agent)
+
+    def _available(self, role: str) -> bool:
+        agent = self._role(role)['agent']
+        return agent == 'codex' or self._runner_for(agent) is not None
+
+    def _splits_frontend(self) -> bool:
+        """Frontend work goes to its own agent when routing is on and that agent differs from the backend one."""
+        return (bool(self._setting('claude_frontend', False)) and self._available('frontend')
+                and self._role('frontend')['agent'] != self._role('backend')['agent'])
+
+    def _agent_for(self, task: dict, role: str) -> str:
+        """The agent that already holds this job for the task, so resumed work continues where it started."""
+        return (self._json_object(task, 'agents').get(role) or {}).get('agent') or self._role(role)['agent']
+
+    @staticmethod
+    def _json_object(task: dict | None, column: str) -> dict:
+        return json.loads((task or {}).get(column) or '{}')
+
+    def _credit(self, key: str, roles: tuple[str, ...] | list[str], agent: str, model: str | None,
+                effort: str | None, outcome: ClaudeResult | None = None, *, passes: int = 1) -> None:
+        """Record who does a job, so the review shows e.g. PLAN: Claude Opus, FE: Antigravity Gemini."""
+        current = self.database.get_task(key) or {}
+        agents = self._json_object(current, 'agents')
+        for role in roles:
+            entry = agents.get(role) or {}
+            if entry.get('agent') != agent:
+                entry = {}
+            agents[role] = {'agent': agent, 'model': (outcome.model if outcome else None) or model or entry.get('model'),
+                            'effort': effort or entry.get('effort'),
+                            'input_tokens': entry.get('input_tokens', 0) + (outcome.input_tokens if outcome else 0),
+                            'output_tokens': entry.get('output_tokens', 0) + (outcome.output_tokens if outcome else 0),
+                            'passes': entry.get('passes', 0) + passes}
+        self.database.update_task(key, TaskState(current.get('state') or TaskState.CODING.value), agents=agents)
+
+    def _sessions(self, key: str) -> dict:
+        task = self.database.get_task(key) or {}
+        sessions = self._json_object(task, 'agent_sessions')
+        if task.get('claude_session_id'):
+            sessions.setdefault('frontend', task['claude_session_id'])  # tasks started before sessions were per role
+        return sessions
+
+    def _remember_session(self, key: str, role: str, session: str) -> None:
+        task = self.database.get_task(key) or {}
+        sessions = {**self._json_object(task, 'agent_sessions'), role: session}
+        self.database.update_task(key, TaskState(task.get('state') or TaskState.CODING.value), agent_sessions=sessions)
+
+    def _codex_recorder(self, key: str):
         def record(event: dict) -> None:
             fields = {'progress': json.dumps(event, ensure_ascii=False)[-16000:]}
             if event.get('thread_id'):
                 fields['session_id'] = event['thread_id']
-            self.database.update_task(issue.key, TaskState.CODING, **fields)
+            self.database.update_task(key, TaskState.CODING, **fields)
             item = event.get('item', {})
             message = item.get('text') or event.get('message') or ''
             if item.get('command'):
@@ -258,48 +378,116 @@ class Orchestrator:
                     message += f"\nExit code: {item['exit_code']}"
             if not message:
                 message = json.dumps(event, ensure_ascii=False)
-            self.database.append_event(issue.key, event.get('type', 'event'), str(message))
+            self.database.append_event(key, event.get('type', 'event'), str(message))
             if event.get('type') == 'approval.timeout' and event.get('approval'):
                 # Keep what was declined so a human can allow it and resume later.
                 approval = {k: event['approval'].get(k) for k in ('kind', 'command', 'cwd', 'reason')}
-                declined = self._json(self.database.get_task(issue.key), 'declined_approvals')
+                declined = self._json(self.database.get_task(key), 'declined_approvals')
                 if approval not in declined:
-                    self.database.update_task(issue.key, TaskState.CODING, declined_approvals=declined + [approval])
+                    self.database.update_task(key, TaskState.CODING, declined_approvals=declined + [approval])
+        return record
 
-        codex_fix = self._codex_fixer(task, worktree, record)
+    def _codex_coder(self, key: str, task: dict, worktree: Path, session_id: str | None,
+                     roles: tuple[str, ...]) -> Coder:
+        record = self._codex_recorder(key)
+        spec = {'model': self._setting('codex_model', None), 'effort': self._setting('codex_reasoning_effort', None)}
+        coder = Coder('codex', roles, None, None)  # type: ignore[arg-type]
 
-        async def code() -> CodexRunResult:
-            first = await self.runner.run(prompt, worktree, session_id=session_id, on_event=record,
-                                          output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
-            verified = await self._verify(issue.key, worktree, first, codex_fix, 'Codex')
-            return await self._settle(issue, worktree, plan, verified, codex_fix, 'Codex', scope)
+        def credited(result: CodexRunResult) -> CodexRunResult:
+            if result.outcome == RunOutcome.SUCCEEDED:
+                self._credit(key, coder.roles, 'codex', spec['model'], spec['effort'])
+            return result
 
-        finished, result = await self._guarded(issue.key, code())
-        if not finished:
-            return
-        review, review_skipped = None, None
-        if self.claude and self._setting('claude_review', False):
-            finished, reviewed = await self._guarded(issue.key, self._review_loop(issue, task, worktree, plan, result, record,
-                                                                                  scope, codex_fix))
-            if not finished:
-                return
-            result, review, review_skipped = reviewed
-        backend = parse_report(result.final_message) if split and result.outcome == RunOutcome.SUCCEEDED else None
-        if backend and backend['status'] == 'COMPLETED' and not (review and review.get('verdict') == 'REQUEST_CHANGES'):
-            finished, frontend = await self._guarded(issue.key, self._frontend_after_backend(
-                issue, task, worktree, plan, backend, result, codex_fix))
-            if not finished:
-                return
-            result = frontend
-        if self._finish(issue.key, result, review, review_skipped) == TaskState.REVIEW:
-            await self._respect_quota()
+        async def start(prompt: str) -> CodexRunResult:
+            self._credit(key, coder.roles, 'codex', spec['model'], spec['effort'], passes=0)
+            return credited(await self.runner.run(prompt, worktree, session_id=session_id, on_event=record,
+                                                  output_schema=REPORT_SCHEMA,
+                                                  preapproved=self._json(task, 'allowed_approvals')))
 
-    def _codex_fixer(self, task: dict, worktree: Path, record):
-        """A follow-up turn in the same Codex thread, used for check failures and review findings."""
         async def fix(prompt: str, previous: CodexRunResult) -> CodexRunResult:
-            return await self.runner.run(prompt, worktree, session_id=previous.session_id, on_event=record,
-                                         output_schema=REPORT_SCHEMA, preapproved=self._json(task, 'allowed_approvals'))
-        return fix
+            """A follow-up turn in the same Codex thread, used for check failures, decisions and review findings."""
+            return credited(await self.runner.run(prompt, worktree, session_id=previous.session_id, on_event=record,
+                                                  output_schema=REPORT_SCHEMA,
+                                                  preapproved=self._json(task, 'allowed_approvals')))
+
+        coder.start, coder.fix = start, fix
+        return coder
+
+    def _cli_coder(self, key: str, agent: str, role: str, worktree: Path, *, resume: bool,
+                   codex_session: str | None, roles: tuple[str, ...]) -> Coder:
+        """Claude Code or Antigravity coding in the worktree; results are shaped like a Codex run so the same
+        finishing rules apply, and Codex's thread id is kept."""
+        name = CODER_NAMES[agent]
+        spec = self._role(role) if self._role(role)['agent'] == agent else {'model': None, 'effort': None}
+        options = dict(write=True, timeout=self._setting('max_task_seconds', 7200),
+                       on_session=lambda session: self._remember_session(key, role, session))
+        coder = Coder(agent, roles, None, None)  # type: ignore[arg-type]
+
+        def shaped(outcome: ClaudeResult) -> CodexRunResult:
+            if not outcome.ok:
+                return CodexRunResult(outcome=RunOutcome.FAILED, session_id=codex_session, error=f'{name}: {outcome.error}')
+            return CodexRunResult(outcome=RunOutcome.SUCCEEDED, session_id=codex_session,
+                                  final_message=json.dumps(outcome.data, ensure_ascii=False))
+
+        async def ask(prompt: str, **extra) -> ClaudeResult:
+            return await self._ask(role, key, prompt, worktree, REPORT_SCHEMA, check_quota=False, agent=agent,
+                                   credit=coder.roles, **options, **extra)
+
+        async def fresh(prompt: str) -> ClaudeResult:
+            if agent == 'claude':
+                session = str(uuid.uuid4())  # Claude takes a preset id, so an interrupted run can be resumed
+                self._remember_session(key, role, session)
+                return await ask(prompt, session_id=session)
+            return await ask(prompt)  # agy names the conversation; on_session stores it as soon as it starts
+
+        async def start(prompt: str) -> CodexRunResult | None:
+            self._credit(key, coder.roles, agent, spec['model'], spec['effort'], passes=0)
+            outcome = None
+            if resume and (previous := self._sessions(key).get(role)):
+                outcome = await ask(prompt, resume=previous)
+                if not outcome.ok and not outcome.session_id:
+                    # The CLI never got going (e.g. the saved session is gone); start a session that reads the worktree.
+                    self.database.append_event(key, 'lifecycle', f'Could not resume the {name} session '
+                                               f'({outcome.error}); starting a new one')
+                    outcome = None
+            if outcome is None:
+                outcome = await fresh(prompt)
+                if not outcome.ok and agent == 'antigravity' and unavailable(outcome.error):
+                    self.database.append_event(key, 'lifecycle', f'{name} cannot code now: {outcome.error}')
+                    return None
+            return shaped(outcome)
+
+        async def fix(prompt: str, _previous: CodexRunResult) -> CodexRunResult:
+            return shaped(await ask(prompt, resume=self._sessions(key).get(role)))
+
+        coder.start, coder.fix = start, fix
+        return coder
+
+    async def _coder(self, role: str, key: str, task: dict, worktree: Path, *, resume: bool,
+                     codex_session: str | None, roles: tuple[str, ...]) -> Coder | None:
+        """The agent that codes this part, or None when it cannot run now (missing CLI, Claude quota reserved)."""
+        agent = self._agent_for(task, role) if resume else self._role(role)['agent']
+        if agent == 'codex':
+            # Codex coding the UI after another agent's backend starts its own thread; resumed work continues it.
+            fresh_thread = role == 'frontend' and not resume
+            return self._codex_coder(key, task, worktree, None if fresh_thread else codex_session, roles)
+        if self._runner_for(agent) is None:
+            return None
+        if agent == 'claude' and (blocked := await self._claude_quota_blocked()):
+            self.database.append_event(key, 'lifecycle', f'Claude Code cannot code now: {blocked}')
+            return None
+        return self._cli_coder(key, agent, role, worktree, resume=resume, codex_session=codex_session, roles=roles)
+
+    async def _backend_coder(self, issue: JiraIssue, task: dict, worktree: Path, *, resume: bool,
+                             codex_session: str | None, roles: tuple[str, ...]) -> Coder:
+        """The backend agent, or Codex when that agent cannot run now; a resumed Codex run stays with Codex."""
+        coder = await self._coder('backend', issue.key, task, worktree, resume=resume, codex_session=codex_session,
+                                  roles=roles)
+        if coder is not None:
+            return coder
+        self.database.append_event(issue.key, 'lifecycle', f"{CODER_NAMES[self._role('backend')['agent']]} "
+                                   'unavailable; Codex implements it instead')
+        return self._codex_coder(issue.key, task, worktree, codex_session, roles)
 
     def _verify_commands(self) -> list[str]:
         return list(getattr(self.settings, 'verify_commands', None) or [])
@@ -507,16 +695,22 @@ class Orchestrator:
         self.wake_event.set()
 
     def _deciding_enabled(self) -> bool:
-        return bool(self.claude and self._setting('claude_decide', False))
+        return bool(self._setting('claude_decide', False) and self._available('decide'))
+
+    def _pass_name(self, role: str) -> str:
+        return AGENT_NAMES[self._role(role)['agent']]
 
     async def _decide(self, key: str, task_text: str, plan: str | None, questions: list[dict],
                       worktree: Path) -> tuple[list[dict], str | None]:
-        """Claude answers open questions as the product owner; returns the answers (possibly fewer) and a summary."""
-        self.database.append_event(key, 'lifecycle', f'Claude deciding {len(questions)} open question(s) as product owner')
+        """The decision agent answers open questions as the product owner; returns the answers (possibly fewer)
+        and a summary."""
+        name = self._pass_name('decide')
+        self.database.append_event(key, 'lifecycle', f'{name} deciding {len(questions)} open question(s) as product owner')
         instructions = self._setting('decide_instructions', None) or DEFAULT_DECIDE_INSTRUCTIONS
-        outcome = await self._ask_claude(key, decide_prompt(task_text, plan, questions, instructions), worktree, DECIDE_SCHEMA)
+        outcome = await self._ask('decide', key, decide_prompt(task_text, plan, questions, instructions), worktree,
+                                  DECIDE_SCHEMA)
         if not outcome.ok:
-            self.database.append_event(key, 'lifecycle', f'Claude could not decide: {outcome.error}')
+            self.database.append_event(key, 'lifecycle', f'{name} could not decide: {outcome.error}')
             return [], None
         asked = {str(item.get('id')): item for item in questions}
         answers = []
@@ -532,7 +726,7 @@ class Orchestrator:
                             'risk': item.get('risk') if item.get('risk') in RISKS else 'MEDIUM',
                             'sources': [str(source) for source in item.get('sources') or []]})
         summary = str(outcome.data.get('summary') or '').strip() or None
-        self.database.append_event(key, 'lifecycle', f'Claude decided {len(answers)}/{len(questions)} question(s)'
+        self.database.append_event(key, 'lifecycle', f'{name} decided {len(answers)}/{len(questions)} question(s)'
                                    + (f': {summary}' if summary else ''))
         return answers, summary
 
@@ -555,7 +749,7 @@ class Orchestrator:
 
     async def _settle(self, issue: JiraIssue, worktree: Path, plan: str | None, result: CodexRunResult, fix,
                       agent: str, scope: str = '') -> CodexRunResult:
-        """When the coder stops on questions, Claude answers them and the coder continues, for a bounded number of rounds."""
+        """When the coder stops on questions, the decision agent answers them and the coder continues, for a bounded number of rounds."""
         if not self._deciding_enabled():
             return result
         rounds = self._setting('claude_decide_rounds', 2)
@@ -579,23 +773,23 @@ class Orchestrator:
         return result
 
     def request_decide(self, key: str) -> None:
-        """Let Claude answer a waiting task's questions in the background, then resume it with them."""
-        if not self.claude:
-            raise ValueError('Claude Code is not enabled')
+        """Let the decision agent answer a waiting task's questions in the background, then resume it with them."""
+        if not self._available('decide'):
+            raise ValueError(f"{CODER_NAMES[self._role('decide')['agent']]} is not enabled")
         task = self.database.get_task(key)
         if not task or task['state'] not in ('needs_human', 'failed', 'interrupted'):
             raise ValueError('Task is not waiting for you')
         if not (json.loads(task['report']) if task.get('report') else {}).get('questions'):
             raise ValueError('The task has no open questions')
         if key in self._deciding:
-            raise ValueError('Claude is already deciding this task')
+            raise ValueError('The agent is already deciding this task')
         self._deciding.add(key)
         job = asyncio.get_running_loop().create_task(self._decide_waiting(key))
         self._background.add(job)
         job.add_done_callback(self._background.discard)
 
     def _decide_backlog(self) -> None:
-        """Hand tasks waiting on questions to Claude once, e.g. those stuck from before deciding was enabled.
+        """Hand tasks waiting on questions to the decision agent once, e.g. those stuck from before deciding was enabled.
 
         A task the agent already decided for stays with the human, so a coder that keeps asking cannot loop forever."""
         if not self._deciding_enabled():
@@ -656,23 +850,38 @@ class Orchestrator:
                 waiter.cancel()
             await asyncio.gather(stopped, aborted, return_exceptions=True)
 
-    async def _ask_claude(self, key: str, prompt: str, worktree: Path, schema: dict, *, check_quota: bool = True,
-                          **options) -> ClaudeResult:
-        """Run one Claude pass when the subscription has quota to spare and record the tokens it used."""
-        if check_quota and (blocked := await self._claude_quota_blocked()):
+    async def _ask(self, role: str, key: str, prompt: str, worktree: Path, schema: dict, *, check_quota: bool = True,
+                   agent: str | None = None, credit: tuple[str, ...] | None = None, **options) -> ClaudeResult:
+        """Run one headless pass with the role's agent and record the tokens it used and who did the job.
+
+        Claude passes wait out the subscription reserve; agent overrides the configured one for resumed work."""
+        spec = self._role(role)
+        if agent and agent != spec['agent']:
+            spec = {'agent': agent, 'model': None, 'effort': None}
+        runner = self._runner_for(spec['agent'])
+        if runner is None:
+            return ClaudeResult(ok=False, error=f"{CODER_NAMES.get(spec['agent'], spec['agent'])} is not enabled")
+        if spec['agent'] == 'claude' and check_quota and (blocked := await self._claude_quota_blocked()):
             return ClaudeResult(ok=False, error=blocked)
-        outcome = await self.claude.run(prompt, worktree, schema=schema,
-                                        on_event=lambda event: self.database.append_event(key, event['type'], event['message']),
-                                        **options)
-        current = self.database.get_task(key) or {}
-        usage = json.loads(current.get('claude_usage') or '{}')
-        usage = {'input_tokens': usage.get('input_tokens', 0) + outcome.input_tokens,
-                 'output_tokens': usage.get('output_tokens', 0) + outcome.output_tokens,
-                 'passes': usage.get('passes', 0) + 1}
-        # A decision pass may run for a task waiting in the human queue; keep whatever state it is in.
-        self.database.update_task(key, TaskState(current.get('state') or TaskState.CODING.value), claude_usage=usage)
-        self.database.append_event(key, 'claude.usage',
+        for name in ('model', 'effort'):
+            if spec[name]:
+                options.setdefault(name, spec[name])
+        outcome = await runner.run(prompt, worktree, schema=schema,
+                                   on_event=lambda event: self.database.append_event(key, event['type'], event['message']),
+                                   **options)
+        if spec['agent'] == 'claude':
+            current = self.database.get_task(key) or {}
+            usage = json.loads(current.get('claude_usage') or '{}')
+            usage = {'input_tokens': usage.get('input_tokens', 0) + outcome.input_tokens,
+                     'output_tokens': usage.get('output_tokens', 0) + outcome.output_tokens,
+                     'passes': usage.get('passes', 0) + 1}
+            # A decision pass may run for a task waiting in the human queue; keep whatever state it is in.
+            self.database.update_task(key, TaskState(current.get('state') or TaskState.CODING.value), claude_usage=usage)
+        self.database.append_event(key, f"{spec['agent']}.usage",
                                    f'{outcome.input_tokens:,} input / {outcome.output_tokens:,} output tokens')
+        if outcome.ok:
+            self._credit(key, credit or (PASS_ROLES.get(role, role),), spec['agent'], options.get('model'),
+                         options.get('effort'), outcome)
         return outcome
 
     async def _claude_quota_blocked(self) -> str | None:
@@ -693,26 +902,32 @@ class Orchestrator:
                         f"(stop at {threshold}%){reset}")
         return None
 
-    async def _plan(self, issue: JiraIssue, task: dict, worktree: Path) -> tuple[str | None, str | None]:
-        """Ask Claude for an implementation plan and the issue's area; Codex plans alone when Claude is unavailable."""
-        self.database.append_event(issue.key, 'lifecycle', 'Claude planning')
-        outcome = await self._ask_claude(issue.key, plan_prompt(self._task_text(issue, task), self.settings.task_instructions),
-                                         worktree, PLAN_SCHEMA)
+    async def _plan(self, issue: JiraIssue, task: dict, worktree: Path) -> tuple[str | None, str | None, list[str]]:
+        """Ask the planning agent for an implementation plan and the issue's area; the coder plans alone when it is
+        unavailable."""
+        name = self._pass_name('plan')
+        self.database.append_event(issue.key, 'lifecycle', f'{name} planning')
+        outcome = await self._ask('plan', issue.key, plan_prompt(self._task_text(issue, task),
+                                                                 self.settings.task_instructions), worktree, PLAN_SCHEMA)
         if not outcome.ok:
-            self.database.append_event(issue.key, 'lifecycle', f'Claude plan unavailable; Codex plans alone: {outcome.error}')
+            self.database.append_event(issue.key, 'lifecycle', f'{name} plan unavailable; '
+                                       f"{CODER_NAMES[self._role('backend')['agent']]} plans alone: {outcome.error}")
             return None, None, []
         plan, area = plan_markdown(outcome.data), outcome.data.get('area')
         self.database.update_task(issue.key, TaskState.CODING, plan=plan, area=area)
-        self.database.append_event(issue.key, 'lifecycle', f"Claude plan ready ({area or 'area unknown'}): "
+        self.database.append_event(issue.key, 'lifecycle', f"{name} plan ready ({area or 'area unknown'}): "
                                    + outcome.data.get('summary', ''))
         return plan, area, [str(item) for item in outcome.data.get('questions') or [] if str(item).strip()]
 
     async def _classify(self, issue: JiraIssue, task: dict, worktree: Path) -> str | None:
-        """Ask Claude whether the issue is frontend, backend or full-stack work; None leaves it all to Codex."""
-        self.database.append_event(issue.key, 'lifecycle', 'Claude classifying the issue')
-        outcome = await self._ask_claude(issue.key, classify_prompt(self._task_text(issue, task)), worktree, CLASSIFY_SCHEMA)
+        """Ask whether the issue is frontend, backend or full-stack work; None leaves it all to the backend agent."""
+        name = self._pass_name('classify')
+        self.database.append_event(issue.key, 'lifecycle', f'{name} classifying the issue')
+        outcome = await self._ask('classify', issue.key, classify_prompt(self._task_text(issue, task)), worktree,
+                                  CLASSIFY_SCHEMA)
         if not outcome.ok:
-            self.database.append_event(issue.key, 'lifecycle', f'Could not classify the issue; Codex codes it: {outcome.error}')
+            self.database.append_event(issue.key, 'lifecycle', 'Could not classify the issue; '
+                                       f"{CODER_NAMES[self._role('backend')['agent']]} codes it: {outcome.error}")
             return None
         area = outcome.data.get('area')
         self.database.update_task(issue.key, TaskState.CODING, area=area)
@@ -720,106 +935,85 @@ class Orchestrator:
         return area
 
     async def _code_frontend(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
-                             backend: dict | None, *, resume: bool, codex_session: str | None) -> CodexRunResult | None:
-        """Claude Code implements the UI in the worktree; None when its quota is reserved and it cannot run now.
-
-        The result is shaped like a Codex run so the same finishing rules apply; Codex's thread id is kept."""
+                             backend: dict | None, *, resume: bool, codex_session: str | None,
+                             backend_agent: str = 'codex') -> CodexRunResult | None:
+        """The frontend agent implements the UI in the worktree; None when it cannot run now."""
         key = issue.key
-        if blocked := await self._claude_quota_blocked():
-            self.database.append_event(key, 'lifecycle', f'Claude Code cannot code the frontend now: {blocked}')
+        coder = await self._coder('frontend', key, task, worktree, resume=resume, codex_session=codex_session,
+                                  roles=('frontend',))
+        if coder is None:
             return None
-        previous = task.get('claude_session_id') if resume else None
         self.database.update_task(key, TaskState.CODING, phase='frontend')
-        self.database.append_event(key, 'lifecycle', 'Claude Code resuming the frontend work' if previous
-                                   else 'Claude Code implementing the frontend')
-        prompt = self._prompt(issue, task, plan, frontend_scope(backend))
+        self.database.append_event(key, 'lifecycle', f'{coder.name} resuming the frontend work' if resume
+                                   else f'{coder.name} implementing the frontend')
+        prompt = self._prompt(issue, task, plan, frontend_scope(backend, CODER_NAMES[backend_agent]))
         if resume:
-            prompt = self._resume_preamble(task, approvals=False) + prompt
-        options = dict(write=True, timeout=self._setting('max_task_seconds', 7200))
-
-        async def fresh() -> ClaudeResult:
-            session = str(uuid.uuid4())
-            self.database.update_task(key, TaskState.CODING, claude_session_id=session)
-            return await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False, session_id=session, **options)
-
-        outcome = None
-        if previous:
-            outcome = await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False, resume=previous, **options)
-            if not outcome.ok and not outcome.session_id:
-                # The CLI never got going (e.g. the saved session is gone); start a session that reads the worktree.
-                self.database.append_event(key, 'lifecycle', f'Could not resume the Claude session ({outcome.error}); starting a new one')
-                outcome = None
-        outcome = outcome or await fresh()
-
-        def shaped(claude: ClaudeResult) -> CodexRunResult:
-            if not claude.ok:
-                return CodexRunResult(outcome=RunOutcome.FAILED, session_id=codex_session, error=f'Claude Code: {claude.error}')
-            return CodexRunResult(outcome=RunOutcome.SUCCEEDED, session_id=codex_session,
-                                  final_message=json.dumps(claude.data, ensure_ascii=False))
-
-        async def fix(prompt: str, _previous: CodexRunResult) -> CodexRunResult:
-            session = (self.database.get_task(key) or {}).get('claude_session_id')
-            return shaped(await self._ask_claude(key, prompt, worktree, REPORT_SCHEMA, check_quota=False,
-                                                 resume=session, **options))
-
-        result = await self._verify(key, worktree, shaped(outcome), fix, 'Claude Code')
-        result = await self._settle(issue, worktree, plan, result, fix, 'Claude Code')
+            prompt = self._resume_preamble(task, approvals=coder.agent == 'codex') + prompt
+        result = await coder.start(prompt)
+        if result is None:
+            return None
+        result = await self._verify(key, worktree, result, coder.fix, coder.name)
+        result = await self._settle(issue, worktree, plan, result, coder.fix, coder.name)
         report = parse_report(result.final_message) if backend and result.outcome == RunOutcome.SUCCEEDED else None
         if report:
-            result = result.model_copy(update={'final_message': json.dumps(merge_reports(backend, report), ensure_ascii=False)})
+            merged = merge_reports(backend, report, CODER_NAMES[backend_agent], coder.name)
+            result = result.model_copy(update={'final_message': json.dumps(merged, ensure_ascii=False)})
         return result
 
     async def _frontend_after_backend(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
-                                      backend: dict, result: CodexRunResult, codex_fix) -> CodexRunResult:
-        """Second half of a full-stack issue: Claude codes the UI, or Codex does when Claude cannot run."""
+                                      backend: dict, result: CodexRunResult, coder: Coder) -> CodexRunResult:
+        """Second half of a full-stack issue: the frontend agent codes the UI, or the backend agent continues
+        when it cannot run."""
         self.database.update_task(issue.key, TaskState.CODING, backend_report=backend, session_id=result.session_id)
         frontend = await self._code_frontend(issue, task, worktree, plan, backend, resume=False,
-                                             codex_session=result.session_id)
+                                             codex_session=result.session_id, backend_agent=coder.agent)
         if frontend is not None:
             return frontend
         self.database.update_task(issue.key, TaskState.CODING, phase='coding')
-        self.database.append_event(issue.key, 'lifecycle', 'Codex implementing the frontend instead')
-        frontend = await codex_fix(
+        self.database.append_event(issue.key, 'lifecycle', f'{coder.name} implementing the frontend instead')
+        coder.roles = ('frontend',)
+        frontend = await coder.fix(
             'The backend part is done. Now implement the frontend part of the issue in this worktree on top of it, '
             'following the same rules and plan, recapture screenshots of the changed UI and report on the whole issue.\n\n'
             + output_contract(self._setting('approval_timeout_seconds', 0)), result)
-        frontend = await self._verify(issue.key, worktree, frontend, codex_fix, 'Codex')
-        return await self._settle(issue, worktree, plan, frontend, codex_fix, 'Codex')
+        frontend = await self._verify(issue.key, worktree, frontend, coder.fix, coder.name)
+        return await self._settle(issue, worktree, plan, frontend, coder.fix, coder.name)
 
     async def _review_loop(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
-                           result: CodexRunResult, record, scope: str = '',
-                           codex_fix=None) -> tuple[CodexRunResult, dict | None, str | None]:
-        """Claude reviews COMPLETED work; Codex fixes requested changes for a bounded number of rounds.
+                           result: CodexRunResult, coder: Coder,
+                           scope: str = '') -> tuple[CodexRunResult, dict | None, str | None]:
+        """The review agent reviews COMPLETED work; the coder fixes requested changes for a bounded number of rounds.
 
-        Returns the final Codex result, the last review and, when the latest change went unreviewed, why."""
+        Returns the final result, the last review and, when the latest change went unreviewed, why."""
         rounds, review, skipped = self._setting('claude_review_rounds', 1), None, None
+        name = self._pass_name('review')
         for attempt in range(rounds + 1):
             report = parse_report(result.final_message) if result.outcome == RunOutcome.SUCCEEDED else None
             if not report or report['status'] != 'COMPLETED':
                 break
             self.database.update_task(issue.key, TaskState.CODING, phase='reviewing')
-            self.database.append_event(issue.key, 'lifecycle', 'Claude reviewing changes')
-            outcome = await self._ask_claude(issue.key, review_prompt(self._task_text(issue, task, scope), plan, report),
-                                             worktree, REVIEW_SCHEMA)
+            self.database.append_event(issue.key, 'lifecycle', f'{name} reviewing changes')
+            outcome = await self._ask('review', issue.key,
+                                      review_prompt(self._task_text(issue, task, scope), plan, report, coder.name),
+                                      worktree, REVIEW_SCHEMA)
             if not outcome.ok:
                 # Unreviewed work goes to the human queue rather than looking as vetted as reviewed work.
-                self.database.append_event(issue.key, 'lifecycle', f'Claude review unavailable: {outcome.error}')
-                skipped = outcome.error or 'Claude review unavailable'
+                self.database.append_event(issue.key, 'lifecycle', f'{name} review unavailable: {outcome.error}')
+                skipped = outcome.error or f'{name} review unavailable'
                 if review is not None:
-                    # An earlier review describes code Codex has since changed; keep it only in the log.
+                    # An earlier review describes code the coder has since changed; keep it only in the log.
                     self.database.update_task(issue.key, TaskState.CODING, review=None)
                 review = None
                 break
             review = outcome.data
             self.database.update_task(issue.key, TaskState.CODING, review=review)
-            self.database.append_event(issue.key, 'lifecycle', f"Claude review: {review['verdict']} — {review.get('summary', '')}")
+            self.database.append_event(issue.key, 'lifecycle', f"{name} review: {review['verdict']} — {review.get('summary', '')}")
             if review['verdict'] != 'REQUEST_CHANGES' or attempt == rounds:
                 break
             self.database.update_task(issue.key, TaskState.CODING, phase='fixing')
-            self.database.append_event(issue.key, 'lifecycle', f'Codex fixing review findings (round {attempt + 1}/{rounds})')
-            codex_fix = codex_fix or self._codex_fixer(task, worktree, record)
-            result = await codex_fix(fix_prompt(review, output_contract(self._setting('approval_timeout_seconds', 0))), result)
-            result = await self._verify(issue.key, worktree, result, codex_fix, 'Codex')
+            self.database.append_event(issue.key, 'lifecycle', f'{coder.name} fixing review findings (round {attempt + 1}/{rounds})')
+            result = await coder.fix(fix_prompt(review, output_contract(self._setting('approval_timeout_seconds', 0))), result)
+            result = await self._verify(issue.key, worktree, result, coder.fix, coder.name)
         return result, review, skipped
 
     def _finish(self, key: str, result: CodexRunResult, review: dict | None = None,
@@ -834,13 +1028,13 @@ class Orchestrator:
             report = self._check_images(key, report)
         status = report['status'] if report else None
         if status == 'COMPLETED' and review and review.get('verdict') == 'REQUEST_CHANGES':
-            # Codex says done but Claude still sees blocking issues after the allowed fix rounds.
+            # The coder says done but the reviewer still sees blocking issues after the allowed fix rounds.
             state = TaskState.NEEDS_HUMAN
-            error = 'Claude review requested changes: ' + (review.get('summary') or 'see review findings')
+            error = f"{self._pass_name('review')} review requested changes: " + (review.get('summary') or 'see review findings')
         elif status == 'COMPLETED' and review_skipped:
             # Review is enabled but did not run; check the change (and its screenshots) by hand.
             state = TaskState.NEEDS_HUMAN
-            error = f'Claude review skipped ({review_skipped}); review the change and screenshots manually'
+            error = f"{self._pass_name('review')} review skipped ({review_skipped}); review the change and screenshots manually"
         elif status == 'COMPLETED':
             state, error = TaskState.REVIEW, None
         else:
