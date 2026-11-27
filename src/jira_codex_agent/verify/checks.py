@@ -27,6 +27,19 @@ class CheckResult(BaseModel):
     signature: list[str] = []  # normalized error lines of the full log, to compare a failure with the base commit
 
 
+TIMEOUT_LINE = re.compile(r'timed out|timeout|time-out', re.IGNORECASE)
+
+
+def timed_out(result: CheckResult) -> bool:
+    """Whether a failed check reports per-test timeouts (e.g. Vitest's "Test timed out in 5000ms").
+
+    A check the automation itself killed for running past verify_timeout_seconds has no exit code and is not counted:
+    rerunning it would only take as long again."""
+    if result.ok or result.exit_code is None:
+        return False
+    return any(TIMEOUT_LINE.search(line) for line in [*result.signature, result.output])
+
+
 def failure_signature(text: str, root: Path | str | None = None) -> list[str]:
     """Error lines of a log made comparable across worktrees and runs: no paths, numbers, timings or colours."""
     if root:

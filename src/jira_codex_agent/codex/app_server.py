@@ -48,7 +48,7 @@ def auto_approved(command, patterns) -> bool:
 
 class CodexRunner:
     def __init__(self, command='codex', model=None, timeout=7200, approvals_reviewer='user', approval_timeout=0,
-                 reasoning_effort=None, service_tier=None, auto_approve=None):
+                 reasoning_effort=None, service_tier=None, auto_approve=None, network_access=False):
         if approvals_reviewer not in ('user', 'auto_review'):
             raise ValueError('Unsupported approval reviewer')
         self.approvals_reviewer = approvals_reviewer
@@ -57,6 +57,7 @@ class CodexRunner:
         self.command, self.model, self.timeout = command, model, timeout
         self.reasoning_effort, self.service_tier = reasoning_effort, service_tier
         self.auto_approve = list(auto_approve or [])  # command patterns accepted without a human
+        self.network_access = network_access  # sockets inside the workspace-write sandbox (Docker, dev server, network)
         self.approvals, self._answers = {}, {}
 
     def answer_approval(self, token, decision):
@@ -256,6 +257,9 @@ class CodexRunner:
                 turn['effort'] = self.reasoning_effort
             if output_schema:
                 turn['outputSchema'] = output_schema
+            if self.network_access:
+                # Still workspace-write (cwd and /tmp writable); only sockets are opened up. Applies to resumed threads too.
+                turn['sandboxPolicy'] = {'type': 'workspaceWrite', 'networkAccess': True}
             await request('turn/start', turn)
             remaining = float(self.timeout)
             while not finished.done():

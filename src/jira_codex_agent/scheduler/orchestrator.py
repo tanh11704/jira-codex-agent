@@ -33,8 +33,9 @@ from jira_codex_agent.jira.models import JiraIssue, adf_to_text
 from jira_codex_agent.macos import SleepGuard
 from jira_codex_agent.storage.database import Database, TaskState
 from jira_codex_agent.verify.checks import (CheckResult, check_fix_prompt, checks_section, failure_feedback,
-                                            failure_signature, run_check)
+                                            failure_signature, run_check, timed_out)
 from jira_codex_agent.verify.images import changed_image_references, is_declared
+from jira_codex_agent.verify.ui_capture import CaptureResult, capture as capture_ui, capture_section
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,9 @@ class Coder:
     def name(self) -> str:
         return CODER_NAMES[self.agent]
 
+
+# How the daemon's screenshot and layout pass appears in a report's tests.
+CAPTURE_COMMAND = 'UI capture (automation)'
 
 class Orchestrator:
     def __init__(
@@ -493,72 +497,128 @@ class Orchestrator:
         return list(getattr(self.settings, 'verify_commands', None) or [])
 
     async def _verify(self, key: str, worktree: Path, result: CodexRunResult, fix, agent: str) -> CodexRunResult:
-        """Run the configured build/test commands ourselves, outside the agent's sandbox.
+        """Run the configured build/test commands ourselves, outside the agent's sandbox, then capture the UI.
 
         Runs after a COMPLETED report, or a PARTIAL one whose only gap is checks the sandbox blocked. A failure goes
         back to the agent as a trimmed excerpt for a bounded number of rounds; what still fails downgrades the report
-        to PARTIAL so a human looks at it. Failures that already happen on the base commit are reported, not blamed."""
+        to PARTIAL so a human looks at it. Failures that already happen on the base commit are reported, not blamed.
+        Once the checks pass, the screens the agent declared in "ui_captures" are rendered and layout-checked here;
+        layout problems go back like a failed check, and the screenshots go to the reviewer."""
         commands = self._verify_commands()
         rounds = self._setting('verify_fix_rounds', 2)
         timeout = self._setting('verify_timeout_seconds', 1800)
         for attempt in range(rounds + 1):
-            report = parse_report(result.final_message) if commands and result.outcome == RunOutcome.SUCCEEDED else None
+            report = parse_report(result.final_message) if result.outcome == RunOutcome.SUCCEEDED else None
             if not report or not self._verifiable(report):
+                return result
+            captures = (report.get('ui_captures') or []) if self._setting('ui_capture', True) else []
+            if not commands and not captures:
                 return result
             promoted = report['status'] != 'COMPLETED'
             self.database.update_task(key, TaskState.CODING, phase='verifying')
-            self.database.append_event(key, 'lifecycle', f'Running {len(commands)} local check(s)'
-                                       + (' that the sandbox blocked' if promoted else ''))
-            results, preexisting = await self._run_checks(key, worktree, commands, timeout)
+            results, preexisting, flaky = [], [], []
+            if commands:
+                self.database.append_event(key, 'lifecycle', f'Running {len(commands)} local check(s)'
+                                           + (' that the sandbox blocked' if promoted else ''))
+                results, preexisting, flaky = await self._run_checks(key, worktree, commands, timeout)
             checked = {item.command: 'PASS' if item.ok else ('PRE-EXISTING' if item in preexisting else 'FAIL')
                        for item in results}
+            failures = [item for item in results if not item.ok and item not in preexisting]
+            if not failures and captures:
+                shot = await self._capture_ui(key, worktree, captures, timeout)
+                report['screenshots'] = shot.screenshots
+                if shot.blocked:
+                    checked[CAPTURE_COMMAND] = 'BLOCKED'
+                    report['report'] = ((report.get('report') or '').rstrip()
+                                        + f'\n\n## Chụp UI tự động không chạy được\n{shot.blocked}\nCần kiểm tra giao diện thủ công.')
+                elif shot.ok:
+                    checked[CAPTURE_COMMAND] = 'PASS'
+                else:
+                    checked[CAPTURE_COMMAND] = 'FAIL'
+                    failures = [CheckResult(command=CAPTURE_COMMAND, ok=False, exit_code=1, output=shot.output)]
             report['tests'] = [test for test in report.get('tests') or [] if test.get('command') not in checked] + [
                 {'command': command, 'result': outcome} for command, outcome in checked.items()]
-            if all(item.ok or item in preexisting for item in results):
+            if not failures:
                 if promoted:
                     self.database.append_event(key, 'lifecycle', 'Checks blocked in the sandbox passed here; report upgraded to COMPLETED')
                     report.update(status='COMPLETED', blockers=[], sandbox_blocked_only=False)
                 if preexisting:
                     report['report'] = (report.get('report') or '').rstrip() + '\n\n' + self._preexisting_section(preexisting)
+                if flaky:
+                    report['report'] = (report.get('report') or '').rstrip() + '\n\n' + self._flaky_section(flaky)
                 return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
-            failed = results[-1].command
+            failed = failures[-1].command
             if attempt == rounds:
                 self.database.append_event(key, 'lifecycle', f'Local check still failing: {failed}')
                 report.update(status='PARTIAL', blockers=(report.get('blockers') or []) + [f'Local check failed: {failed}'])
                 return result.model_copy(update={'final_message': json.dumps(report, ensure_ascii=False)})
             self.database.update_task(key, TaskState.CODING, phase='fixing')
             self.database.append_event(key, 'lifecycle', f'{agent} fixing failed check {failed} (round {attempt + 1}/{rounds})')
-            feedback = failure_feedback([item for item in results if item not in preexisting], commands[len(results):])
+            skipped = commands[len(results):] if failed != CAPTURE_COMMAND else []
+            feedback = failure_feedback(failures, skipped)
             result = await fix(check_fix_prompt(feedback, output_contract(self._setting('approval_timeout_seconds', 0))), result)
         return result
+
+    async def _capture_ui(self, key: str, worktree: Path, captures: list[dict], timeout: int) -> CaptureResult:
+        self.database.append_event(key, 'lifecycle', f'Capturing {len(captures)} UI screen(s) outside the sandbox')
+        data_dir = Path(self._setting('data_dir', None) or worktree.parent)
+        shot = await capture_ui(worktree, captures, data_dir, timeout)
+        outcome = 'BLOCKED' if shot.blocked else ('PASS' if shot.ok else 'FAIL')
+        self.database.append_event(key, 'check', f'{CAPTURE_COMMAND} → {outcome} ({shot.seconds}s, '
+                                   f'{len(shot.screenshots)} screenshot(s))'
+                                   + (f'\n{shot.blocked or shot.output}' if not shot.ok else ''))
+        return shot
 
     @staticmethod
     def _verifiable(report: dict) -> bool:
         if report['status'] == 'COMPLETED':
             return True
-        return report['status'] == 'PARTIAL' and bool(report.get('sandbox_blocked_only')) and not report.get('questions')
+        if report['status'] != 'PARTIAL' or report.get('questions'):
+            return False
+        # A PARTIAL with nothing left for a human (only BLOCKED checks) is a sandbox gap, whatever the flag says.
+        return bool(report.get('sandbox_blocked_only')) or not report.get('blockers')
 
     def _preexisting_section(self, failures: list[CheckResult]) -> str:
         listed = '\n'.join(f'- `{item.command}`' for item in failures)
         return ('## Check lỗi sẵn có trên base\n'
                 'Các check sau cũng lỗi y hệt trên commit base, nên không tính là lỗi của task này:\n' + listed)
 
+    def _flaky_section(self, commands: list[str]) -> str:
+        listed = '\n'.join(f'- `{command}`' for command in commands)
+        return ('## Check không ổn định (timeout)\n'
+                'Các check sau lần đầu lỗi do timeout, chạy lại thì PASS; nên xem lại độ ổn định hoặc timeout của suite:\n'
+                + listed)
+
     async def _run_checks(self, key: str, worktree: Path, commands: list[str],
-                          timeout: int) -> tuple[list[CheckResult], list[CheckResult]]:
-        """Run commands in order; stop at the first failure the base commit does not share."""
-        results, preexisting = [], []
+                          timeout: int) -> tuple[list[CheckResult], list[CheckResult], list[str]]:
+        """Run commands in order; stop at the first failure the base commit does not share.
+
+        A failure that looks like a timeout is rerun first: a loaded machine makes long suites miss per-test timeouts,
+        which the agent cannot fix and which would otherwise end the task PARTIAL."""
+        results, preexisting, flaky = [], [], []
+        retries = self._setting('verify_flaky_retries', 1)
         for command in commands:
             item = await run_check(command, worktree, timeout)
-            results.append(item)
             self.database.append_event(key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} ({item.seconds}s)"
                                        + ('' if item.ok else '\n' + item.output))
+            for attempt in range(retries):
+                if item.ok or not timed_out(item):
+                    break
+                self.database.append_event(key, 'lifecycle', f'{command} failed with a timeout; rerunning '
+                                           f'({attempt + 1}/{retries})')
+                item = await run_check(command, worktree, timeout)
+                self.database.append_event(key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} "
+                                           f"({item.seconds}s, rerun)" + ('' if item.ok else '\n' + item.output))
+                if item.ok:
+                    flaky.append(command)
+            results.append(item)
             if item.ok:
                 continue
             if await self._fails_on_base(key, worktree, item, timeout):
                 preexisting.append(item)
                 continue
             break
-        return results, preexisting
+        return results, preexisting, flaky
 
     async def _fails_on_base(self, key: str, worktree: Path, failed: CheckResult, timeout: int) -> bool:
         """Whether the base commit fails this check with the same errors, so the task did not cause them."""
@@ -974,7 +1034,7 @@ class Orchestrator:
         coder.roles = ('frontend',)
         frontend = await coder.fix(
             'The backend part is done. Now implement the frontend part of the issue in this worktree on top of it, '
-            'following the same rules and plan, recapture screenshots of the changed UI and report on the whole issue.\n\n'
+            'following the same rules and plan, declare the changed screens in "ui_captures" and report on the whole issue.\n\n'
             + output_contract(self._setting('approval_timeout_seconds', 0)), result)
         frontend = await self._verify(issue.key, worktree, frontend, coder.fix, coder.name)
         return await self._settle(issue, worktree, plan, frontend, coder.fix, coder.name)
@@ -1239,8 +1299,9 @@ Description:
 
     def _prompt(self, issue: JiraIssue, task: dict | None = None, plan: str | None = None, scope: str = '') -> str:
         checks = checks_section(commands) if (commands := self._verify_commands()) else ''
+        shots = capture_section() if self._setting('ui_capture', True) else ''
         return f"""{self._task_text(issue, task, scope)}{plan_section(plan) if plan else ''}
 {self.settings.task_instructions}
-{checks}
+{checks}{shots}
 {output_contract(self._setting('approval_timeout_seconds', 0))}
 """

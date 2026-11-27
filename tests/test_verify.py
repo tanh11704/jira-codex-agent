@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from jira_codex_agent.config import Settings
-from jira_codex_agent.verify.checks import CheckResult, failure_signature, run_checks, trim_output
+from jira_codex_agent.verify.ui_capture import CaptureResult
+from jira_codex_agent.verify.checks import CheckResult, failure_signature, run_checks, timed_out, trim_output
 
 from test_claude import COMPLETED, FRONTEND_REPORT, classified, setup
 from test_unattended import issue
@@ -108,6 +109,115 @@ async def test_other_partial_reports_are_not_verified(tmp_path, monkeypatch):
     monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', fake)
     await orchestrator.process(issue())
     assert calls == [] and db.get_task('TM-1')['state'] == 'needs_human'
+
+
+@pytest.mark.asyncio
+async def test_partial_with_only_blocked_checks_is_verified_even_without_the_flag(tmp_path, monkeypatch):
+    only_checks = json.loads(PARTIAL_SANDBOX) | {'sandbox_blocked_only': False, 'blockers': []}
+    db, orchestrator, _ = setup(tmp_path, [], [json.dumps(only_checks)], verify_commands=['./mvnw verify'])
+    calls, fake = checks(orchestrator, True)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', fake)
+    await orchestrator.process(issue())
+    task = db.get_task('TM-1')
+    assert calls == ['./mvnw verify'] and task['state'] == 'review'
+    assert json.loads(task['report'])['status'] == 'COMPLETED'
+
+
+@pytest.mark.asyncio
+async def test_timeout_failure_is_rerun_before_it_is_blamed(tmp_path, monkeypatch):
+    db, orchestrator, prompts = setup(tmp_path, [], [COMPLETED], verify_commands=['make check'], verify_fix_rounds=1)
+    calls = []
+
+    async def fake(command, cwd, timeout):
+        calls.append(command)
+        if len(calls) == 1:
+            return CheckResult(command=command, ok=False, exit_code=1, output='Error: Test timed out in 5000ms.',
+                               signature=['error: test timed out in #ms.'])
+        return CheckResult(command=command, ok=True, exit_code=0)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', fake)
+    await orchestrator.process(issue())
+    task = db.get_task('TM-1')
+    report = json.loads(task['report'])
+    assert calls == ['make check', 'make check'] and len(prompts) == 1  # no fix round spent on the flake
+    assert task['state'] == 'review' and report['tests'] == [{'command': 'make check', 'result': 'PASS'}]
+    assert 'timeout' in report['report'] and '`make check`' in report['report']
+
+
+def test_only_per_test_timeouts_count_as_flaky():
+    assert timed_out(CheckResult(command='c', ok=False, exit_code=1, output='Test timed out in 5000ms'))
+    assert not timed_out(CheckResult(command='c', ok=False, exit_code=1, output='Error: expected 1 to be 2'))
+    assert not timed_out(CheckResult(command='c', ok=False, output='Timed out after 1800s'))  # killed by us
+
+
+CAPTURE = {'name': 'curriculum', 'dist': 'apps/teacher-web/dist', 'path': '/curriculum', 'local_storage': [],
+           'mocks': [], 'focus': 'button'}
+WITH_UI = json.dumps(json.loads(COMPLETED) | {'ui_captures': [CAPTURE]})
+
+
+def captures(*outcomes):
+    calls = []
+
+    async def fake(worktree, items, data_dir, timeout):
+        calls.append(items)
+        outcome = outcomes[len(calls) - 1]
+        shots = ['.ui-evidence/auto/curriculum-360.png', '.ui-evidence/auto/curriculum-1280.png']
+        if outcome is True:
+            return CaptureResult(ok=True, screenshots=shots)
+        if outcome == 'blocked':
+            return CaptureResult(ok=False, blocked='Cannot start a browser')
+        return CaptureResult(ok=False, output=outcome, screenshots=shots)
+    return calls, fake
+
+
+@pytest.mark.asyncio
+async def test_declared_screens_are_captured_after_checks_and_go_to_the_report(tmp_path, monkeypatch):
+    db, orchestrator, prompts = setup(tmp_path, [], [WITH_UI], verify_commands=['make check'])
+    _, check = checks(orchestrator, True)
+    calls, fake = captures(True)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', check)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.capture_ui', fake)
+    await orchestrator.process(issue())
+    report = json.loads(db.get_task('TM-1')['report'])
+    assert calls == [[CAPTURE]] and 'UI SCREENSHOTS' in prompts[0] and 'ui_captures' in prompts[0]
+    assert report['screenshots'] == ['.ui-evidence/auto/curriculum-360.png', '.ui-evidence/auto/curriculum-1280.png']
+    assert {'command': 'UI capture (automation)', 'result': 'PASS'} in report['tests']
+
+
+@pytest.mark.asyncio
+async def test_layout_problems_go_back_to_the_agent_like_a_failed_check(tmp_path, monkeypatch):
+    db, orchestrator, prompts = setup(tmp_path, [], [WITH_UI, WITH_UI], verify_commands=['make check'],
+                                      verify_fix_rounds=1)
+    _, check = checks(orchestrator, True, True)
+    calls, fake = captures('curriculum @360px: horizontal overflow: page is 520px wide in a 360px viewport', True)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', check)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.capture_ui', fake)
+    await orchestrator.process(issue())
+    assert len(calls) == 2 and 'horizontal overflow' in prompts[1] and 'UI capture (automation) → FAIL' in prompts[1]
+    assert db.get_task('TM-1')['state'] == 'review'
+
+
+@pytest.mark.asyncio
+async def test_capture_that_cannot_run_does_not_block_the_task(tmp_path, monkeypatch):
+    db, orchestrator, prompts = setup(tmp_path, [], [WITH_UI], verify_commands=['make check'])
+    _, check = checks(orchestrator, True)
+    _, fake = captures('blocked')
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.run_check', check)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.capture_ui', fake)
+    await orchestrator.process(issue())
+    task = db.get_task('TM-1')
+    report = json.loads(task['report'])
+    assert len(prompts) == 1 and task['state'] == 'review'
+    assert {'command': 'UI capture (automation)', 'result': 'BLOCKED'} in report['tests']
+    assert 'Cannot start a browser' in report['report']
+
+
+@pytest.mark.asyncio
+async def test_screens_are_captured_even_without_check_commands(tmp_path, monkeypatch):
+    db, orchestrator, _ = setup(tmp_path, [], [WITH_UI])
+    calls, fake = captures(True)
+    monkeypatch.setattr('jira_codex_agent.scheduler.orchestrator.capture_ui', fake)
+    await orchestrator.process(issue())
+    assert calls == [[CAPTURE]] and json.loads(db.get_task('TM-1')['report'])['screenshots']
 
 
 def test_failure_signature_ignores_paths_numbers_and_noise():

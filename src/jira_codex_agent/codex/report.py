@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 
+from jira_codex_agent.verify.ui_capture import CAPTURE_SCHEMA
+
 STATUSES = ("COMPLETED", "PARTIAL", "BLOCKED_BRANCH", "BLOCKED_DEPENDENCY", "NEEDS_HUMAN_REVIEW")
 
 # Passed to turn/start as outputSchema so the final message is machine-readable.
@@ -10,7 +12,7 @@ REPORT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": ["status", "summary", "blockers", "questions", "sandbox_blocked_only", "tests", "screenshots", "images",
-                 "branch", "report"],
+                 "ui_captures", "branch", "report"],
     "properties": {
         "status": {"type": "string", "enum": list(STATUSES)},
         "summary": {"type": "string", "description": "One or two sentences on the resulting behaviour"},
@@ -45,6 +47,7 @@ REPORT_SCHEMA = {
                            "license": {"type": "string", "description": "License of a web image, else empty"},
                            "prompt": {"type": "string",
                                       "description": "English image-generation prompt when source is generate, else empty"}}}},
+        "ui_captures": CAPTURE_SCHEMA,
         "branch": {"type": "string"},
         "report": {"type": "string", "description": "The full human handoff report in Vietnamese"},
     },
@@ -58,6 +61,7 @@ def output_contract(approval_timeout: int) -> str:
 No human is watching this run. {wait}Prefer actions that work inside the workspace sandbox. If an essential action is declined or unavailable, do not loop or retry it; stop and report, naming the declined request in "blockers". A human can allow it and resume this session.
 Your final message must be JSON matching the provided output schema. Put the complete human report (in Vietnamese, following the FINAL REPORT format) in "report".
 When a product, security or scope decision is missing, ask it in "questions": one decision per item, written in Vietnamese, with the context you found and the concrete options you would accept. A human answers them later and you resume this same session and worktree, so leave the work in a resumable state.
+"blockers" lists only what a human or another issue must provide. Never put there: checks your sandbox could not run (mark them BLOCKED in "tests"; the automation reruns its local checks outside the sandbox), screenshots of UI you did not change in this run, or test flakiness outside your change. When an acceptance criterion needs a module or service that does not exist yet and no Jira link names the issue that builds it, do not stop at PARTIAL: ask in "questions" whether to deliver it now behind an interface or stub, or to defer that criterion to a follow-up issue. When a linked unfinished issue provides it, use BLOCKED_DEPENDENCY.
 "status" is COMPLETED only when the implementation and relevant executable checks are complete. Use BLOCKED_DEPENDENCY when the work needs another unfinished issue, BLOCKED_BRANCH for branch/worktree problems, NEEDS_HUMAN_REVIEW for missing product/security decisions, otherwise PARTIAL. Any status other than COMPLETED sends the task to the human queue and the automation moves on to the next issue."""
 
 
@@ -76,9 +80,10 @@ def parse_report(message: str) -> dict | None:
             data.setdefault("sandbox_blocked_only", False)
             data.setdefault("screenshots", [])
             data.setdefault("images", [])
+            data.setdefault("ui_captures", [])
             return data
     match = re.search(r"Status:\s*\**\s*([A-Z_]+)", message)
     if match and match.group(1) in STATUSES:
-        return {"status": match.group(1), "summary": "", "blockers": [], "questions": [], "tests": [], "screenshots": [], "images": [], "branch": "",
+        return {"status": match.group(1), "summary": "", "blockers": [], "questions": [], "tests": [], "screenshots": [], "images": [], "ui_captures": [], "branch": "",
                 "report": message}
     return None

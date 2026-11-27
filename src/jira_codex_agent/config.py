@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # Service tier id from the model catalog (e.g. "priority" for Fast); None uses standard speed.
     codex_service_tier: str | None = None
     codex_prompt_base64: str = ''
+    # Sockets inside Codex's workspace-write sandbox (Docker, local servers, package downloads). Off by default: the
+    # daemon runs Docker-backed checks and UI captures itself, so the agent needs neither nor spends tokens on them.
+    codex_network_access: bool = False
 
     # Build/test commands the daemon runs itself in the worktree once an agent reports COMPLETED (base64, one per line).
     # Agents get only trimmed failure output back, instead of spending tokens on full build and test logs.
@@ -71,6 +74,11 @@ class Settings(BaseSettings):
     verify_timeout_seconds: int = Field(default=1800, ge=30)  # per command
     # A failing check is rerun on the base commit; failures already there are reported, not blamed on the task.
     baseline_checks: bool = True
+    # A check that fails with a timeout is rerun this many times before it is blamed on the task (slow or flaky suites).
+    verify_flaky_retries: int = Field(default=1, ge=0, le=3)
+    # The daemon renders the screens an agent declares in "ui_captures" (built portal + API mocks) with headless Chrome,
+    # fails on overflow/overlap/page errors and hands the screenshots to the reviewer; agents never take screenshots.
+    ui_capture: bool = True
     baseline_setup_command: str = ''  # run once in the baseline worktree before its checks, e.g. pnpm install
     # Command approval requests matching these shell-style patterns are accepted without a human (base64, one per line).
     auto_approve_commands_base64: str = ''

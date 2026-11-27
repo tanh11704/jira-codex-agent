@@ -231,7 +231,7 @@ final class AgentStore: ObservableObject {
     Business logic passing tests does not prove the UI works; layout and interaction defects are bugs too. For every page/component you create or touch:
     Layout: no overlapping, clipped or overflowing elements at 360, 768, 1280 and 1440 px widths. Controls fill their cell (w-full) instead of fixed widths; grid/flex children that hold inputs, selects or long text get min-w-0; rows of fields wrap or stack on narrow widths instead of squeezing; long Vietnamese labels, values and empty states wrap without pushing siblings. Align labels, inputs and buttons on a consistent grid, spacing and height; follow existing design tokens and shared primitives.
     Interaction states: every clickable element (button, link, tab, menu item, row action, icon button) shows cursor-pointer and distinct hover, active and keyboard focus-visible states; disabled elements look disabled and are not clickable; async actions show a pending state (disabled + spinner/label) and a success/error result so the user knows the click worked. Reuse the shared Button/inputs which already have these states rather than unstyled elements.
-    Visual verification: run the affected portal (inspect its scripts; use dev/preview with mocked or seeded data, no remote writes) and capture each changed screen with the repository's existing Playwright/browser tooling, or a temporary script outside package manifests, at 360 and 1280 px plus one hover/focus state of the main action. In the page, also check document.documentElement.scrollWidth <= innerWidth and that no two visible input/select/textarea/button bounding boxes intersect; fix any hit. Save PNGs under .ui-evidence/ in this worktree (git-excluded; never commit them) and list their relative paths in "screenshots". Inspect each screenshot yourself before reporting. If the app cannot be run or a browser is unavailable, record a "UI visual check" test as BLOCKED with the reason and give manual capture steps; never claim visual checks passed without screenshots.
+    Visual verification is done by the automation, not by you: do not start dev servers, drive a browser or take or inspect screenshots. Declare every changed screen and state (empty, filled, error, permission-denied) in "ui_captures": the built portal directory, the route, localStorage entries and API mocks with realistic Vietnamese data, plus the main action as "focus". After the local checks pass, the automation renders each one at 360 and 1280 px, fails on horizontal overflow, overlapping controls and page errors and sends those back to you, and saves the PNGs under .ui-evidence/auto/ (git-excluded; never commit them) for the reviewer; leave "screenshots" empty. If a screen cannot render from the built portal with mocked data, say why in the report and give manual check steps.
 
     VISUAL DESIGN AND IMAGERY
     A user-facing screen that is only text and form fields is unfinished. Within the existing design system, give every changed screen visual hierarchy and life: a clear page header, content grouped into cards or sections, icons from the icon library the portal already uses beside headings, stats, list items, empty states and actions, status badges and color accents from the design tokens, and a purposeful image where it helps the user (intro/hero of learner- or parent-facing pages, onboarding, empty states, success/completion screens, course/subject/feature cards). Keep dense teacher/admin tables and forms calm: icons and badges, not photos. Never show photos of identifiable people as students, teachers or parents; prefer illustrations.
@@ -259,6 +259,7 @@ final class AgentStore: ObservableObject {
     """
     @Published var taskPrompt = AgentStore.defaultTaskPrompt
     @Published var codexApprovalsReviewer = "user"
+    @Published var codexNetworkAccess = false
     @Published var claudePath = "/opt/homebrew/bin/claude"
     @Published var claudePlan = false
     @Published var claudeReview = false
@@ -266,6 +267,7 @@ final class AgentStore: ObservableObject {
     @Published var verifyCommands = ""
     @Published var verifyFixRounds = 2
     @Published var baselineChecks = true
+    @Published var uiCapture = true
     @Published var baselineSetupCommand = ""
     @Published var autoApproveCommands = ""
     @Published var claudeModel = ""
@@ -483,9 +485,11 @@ final class AgentStore: ObservableObject {
             // Save the default as empty so the daemon follows future default updates instead of a stale copy.
             ("JCA_CODEX_PROMPT_BASE64", taskPrompt == AgentStore.defaultTaskPrompt ? "" : Data(taskPrompt.utf8).base64EncodedString()),
             ("JCA_CODEX_APPROVALS_REVIEWER", codexApprovalsReviewer),
+            ("JCA_CODEX_NETWORK_ACCESS", codexNetworkAccess ? "true" : "false"),
             ("JCA_VERIFY_COMMANDS_BASE64", verifyCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : Data(verifyCommands.utf8).base64EncodedString()),
             ("JCA_VERIFY_FIX_ROUNDS", String(verifyFixRounds)),
             ("JCA_BASELINE_CHECKS", baselineChecks ? "true" : "false"),
+            ("JCA_UI_CAPTURE", uiCapture ? "true" : "false"),
             ("JCA_BASELINE_SETUP_COMMAND", baselineSetupCommand.trimmingCharacters(in: .whitespacesAndNewlines)),
             ("JCA_AUTO_APPROVE_COMMANDS_BASE64", autoApproveCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : Data(autoApproveCommands.utf8).base64EncodedString()),
             ("JCA_CLAUDE_COMMAND", claudePath),
@@ -732,12 +736,14 @@ final class AgentStore: ObservableObject {
             taskPrompt = text
         }
         codexApprovalsReviewer = values["JCA_CODEX_APPROVALS_REVIEWER"] == "auto_review" ? "auto_review" : "user"
+        codexNetworkAccess = values["JCA_CODEX_NETWORK_ACCESS"] == "true"
         if let encoded = values["JCA_VERIFY_COMMANDS_BASE64"], let data = Data(base64Encoded: encoded),
            let text = String(data: data, encoding: .utf8) {
             verifyCommands = text
         }
         verifyFixRounds = min(5, max(0, Int(values["JCA_VERIFY_FIX_ROUNDS"] ?? "2") ?? 2))
         baselineChecks = values["JCA_BASELINE_CHECKS"] != "false"
+        uiCapture = values["JCA_UI_CAPTURE"] != "false"
         baselineSetupCommand = values["JCA_BASELINE_SETUP_COMMAND"] ?? ""
         if let encoded = values["JCA_AUTO_APPROVE_COMMANDS_BASE64"], let data = Data(base64Encoded: encoded),
            let text = String(data: data, encoding: .utf8) {

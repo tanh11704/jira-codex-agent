@@ -164,6 +164,33 @@ Claude reports COMPLETED:
 - Passing commands are added to the report's tests. Checks run before Claude's review, so the review never reads a broken
   build, and again after every fix.
 - Include setup in the list when a fresh worktree needs it, e.g. `pnpm install --frozen-lockfile`.
+- A failure whose log reports per-test timeouts (e.g. Vitest's `Test timed out in 5000ms`) is rerun
+  `JCA_VERIFY_FLAKY_RETRIES` times (default 1) before it is blamed, without spending a fix round; a rerun that
+  passes is listed in the report as an unstable check instead of ending the task PARTIAL.
+- A PARTIAL report whose `blockers` list is empty (only BLOCKED checks remain) is verified here like
+  `sandbox_blocked_only`, and upgraded to COMPLETED when the checks pass.
+
+### UI screenshots by the daemon
+
+Agents do not start dev servers, drive browsers or look at screenshots. For each changed screen and state they add an
+item to `ui_captures` in their report: the built portal directory (e.g. `apps/teacher-web/dist`), the route,
+localStorage entries and the API mocks it needs. After the local checks pass (they include the web build), the daemon
+renders each item in headless Google Chrome at 360 and 1280 px, plus the declared main action focused:
+
+- No dev server or backend: files come from the build, API calls from the mocks; unmocked API calls are listed.
+- Horizontal overflow, partly overlapping controls and page errors fail like a check and go back to the agent.
+  Fully contained controls (a show-password button inside an input) are not flagged.
+- PNGs land in `.ui-evidence/auto/` and are listed in the report's `screenshots`, so only the reviewer opens them.
+- `playwright-core` is installed once into `<data dir>/ui-capture` with npm; no browser download (it uses Chrome).
+- If the capture cannot run, it is recorded as BLOCKED and the task continues; the human checks the UI.
+
+Turn it off with `JCA_UI_CAPTURE=false` (**Settings → Prompt → UI screenshots**).
+
+### Codex sandbox network
+
+`JCA_CODEX_NETWORK_ACCESS` (default `false`, **Settings → Automation → Approvals**) opens sockets in Codex's
+`workspace-write` sandbox. It is not needed for Docker-backed checks or UI screenshots, which the daemon runs itself;
+turning it on lets the agent run them in its own context and spend tokens on their logs.
 
 ## Lively UI and images
 

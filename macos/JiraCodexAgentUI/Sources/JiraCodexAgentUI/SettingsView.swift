@@ -424,6 +424,9 @@ struct SettingsView: View {
                      ? "Codex evaluates eligible approval requests automatically. The workspace sandbox stays enabled; some requests may still need you. Auto-review can make mistakes and adds processing."
                      : "Approval requests appear in the dashboard for you to approve or decline.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Allow network and sockets in the Codex sandbox", isOn: $store.codexNetworkAccess)
+                Text("Usually not needed: the daemon runs Docker-backed checks and UI captures itself, outside the sandbox. On lets Codex reach Docker, local servers and the internet, and spend tokens on them; writes stay limited to the worktree.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Unattended operation") {
                 Stepper(store.approvalTimeoutMinutes == 0 ? "Approval timeout: wait forever" : "Decline unanswered approvals after \(store.approvalTimeoutMinutes) min",
@@ -504,6 +507,14 @@ struct SettingsView: View {
                 Text("Pre-existing failures")
             } footer: {
                 Text("When a check fails, it is rerun once on the base commit in a shared worktree (cached per commit). If the base fails with the same errors, the check is marked PRE-EXISTING and does not block the task; any new error still goes back to the agent.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Capture changed UI screens here", isOn: $store.uiCapture)
+            } header: {
+                Text("UI screenshots")
+            } footer: {
+                Text("Agents only declare the changed screens with their API mocks. After the checks pass, the daemon renders them from the built portal in headless Chrome at 360 and 1280 px, sends overflow, overlapping controls and page errors back to the agent, and gives the screenshots to the reviewer. Agents never start servers or look at screenshots themselves.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {

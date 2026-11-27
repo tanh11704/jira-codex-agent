@@ -140,6 +140,8 @@ for raw in sys.stdin:
   send({'id':m['id'],'result':{'thread':{'id':'thread-1'}}})
  elif method == 'turn/start':
   sent = {'model': thread.get('model'), 'serviceTier': thread.get('serviceTier'), 'effort': m['params'].get('effort')}
+  if 'sandboxPolicy' in m['params']:
+   sent['sandboxPolicy'] = m['params']['sandboxPolicy']
   send({'id':m['id'],'result':{'turn':{'id':'turn-1'}}})
   send({'method':'item/completed','params':{'item':{'type':'agentMessage','text':json.dumps(sent)}}})
   send({'method':'turn/completed','params':{'turn':{'status':'completed'}}})
@@ -151,6 +153,8 @@ for raw in sys.stdin:
     ({}, {'model': None, 'serviceTier': None, 'effort': None}),
     ({'model': 'gpt-x', 'reasoning_effort': 'xhigh', 'service_tier': 'priority'},
      {'model': 'gpt-x', 'serviceTier': 'priority', 'effort': 'xhigh'}),
+    ({'network_access': True}, {'model': None, 'serviceTier': None, 'effort': None,
+                                'sandboxPolicy': {'type': 'workspaceWrite', 'networkAccess': True}}),
 ])
 async def test_model_effort_and_speed_are_forwarded(tmp_path, kwargs, expected):
     path = tmp_path / 'fake-codex'

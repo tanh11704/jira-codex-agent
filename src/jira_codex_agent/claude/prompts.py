@@ -96,7 +96,7 @@ def plan_prompt(task: str, instructions: str) -> str:
 
 Explore the repository read-only: project rules (AGENTS.md, CLAUDE.md, RULES.md, CONTRIBUTING.md, README.md), relevant specs, contracts and the nearby code and tests. Do not modify any file.
 Produce a concrete plan: ordered steps naming the exact files, classes and functions to change, the existing patterns to copy (with paths), contract/migration/UI impact, tests to add and the exact commands to verify.
-For UI work, name the shared layout and control primitives to reuse (form grid, inputs, Button with hover/focus/disabled/pending states), how the screen lays out at 360 and 1280 px, its visual treatment (header, cards, icons from the portal's icon library, badges, and each image slot with its source, asset path and aspect ratio; existing repository assets first), and how to run the portal and capture screenshots for the visual check. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
+For UI work, name the shared layout and control primitives to reuse (form grid, inputs, Button with hover/focus/disabled/pending states), how the screen lays out at 360 and 1280 px, its visual treatment (header, cards, icons from the portal's icon library, badges, and each image slot with its source, asset path and aspect ratio; existing repository assets first), and which screens and states to declare in "ui_captures" with the API data each one needs. Keep it focused on this issue. Note risks, and list missing product or security decisions under questions instead of inventing them. Write in English.
 For full-stack issues, order the backend steps before the frontend steps: one agent implements the backend first, another the UI on top of it.
 
 {AREA_RULES}
@@ -125,7 +125,7 @@ This is a full-stack issue. Implement only the server-side part (APIs, data, mig
 
 IMPLEMENTER_SCOPE = """
 YOU ARE THE IMPLEMENTER
-You are coding this issue yourself in this Git worktree: edit files directly, run the checks and the visual verification, then report.
+You are coding this issue yourself in this Git worktree: edit files directly, run narrow checks, declare the changed screens in "ui_captures", then report.
 """
 
 
@@ -135,7 +135,7 @@ def frontend_scope(backend: dict | None, backend_agent: str = 'Codex') -> str:
     tests = ', '.join(f"{t.get('command')} → {t.get('result')}" for t in backend.get('tests') or []) or 'none reported'
     return f"""
 YOU ARE THE IMPLEMENTER: FRONTEND PART
-This is a full-stack issue. Another agent ({backend_agent}) already implemented and verified the backend part; its changes are UNCOMMITTED in this worktree (see git status / git diff HEAD). Implement only the UI on top of them, edit files directly, run the checks and the visual verification, then report. Change backend code only when a defect blocks the UI, and explain it in the report.
+This is a full-stack issue. Another agent ({backend_agent}) already implemented and verified the backend part; its changes are UNCOMMITTED in this worktree (see git status / git diff HEAD). Implement only the UI on top of them, edit files directly, run narrow checks, declare the changed screens in "ui_captures", then report. Change backend code only when a defect blocks the UI, and explain it in the report.
 Backend summary: {backend.get('summary', '')}
 Backend tests: {tests}
 """
@@ -178,11 +178,11 @@ Inspect the change read-only: git status --short, git diff HEAD, and read every 
 Check: acceptance criteria coverage, correctness and edge cases, authorization/tenant/data-safety, contract and migration drift, missing or weakened tests, rule violations, unrelated changes and leftovers. Be specific: give location, the problem and the fix.
 
 When the diff touches UI (components, pages, styles), review it as a user would see it, not only as logic:
-- Open every screenshot listed below with the Read tool and look for overlapping or clipped controls, horizontal overflow, misaligned labels/inputs/buttons, cramped or broken rows, text cut off or wrapping badly, and states that look unfinished. A visible layout defect is a major finding.
+- The automation rendered the declared screens and already failed on horizontal overflow, overlapping controls and page errors; do not re-check those. Open each screenshot listed below once with the Read tool for what a script cannot judge: clipped text, misaligned labels/inputs/buttons, cramped or broken rows, text wrapping badly and states that look unfinished. A visible layout defect is a major finding.
 - Read the markup and classes for causes screenshots can miss: fixed widths on controls inside grid/flex cells, grid/flex children holding inputs without min-w-0, field rows that never stack on narrow widths, absolute positioning or negative margins that can collide, and raw elements bypassing shared primitives.
 - Every clickable element needs cursor-pointer plus distinct hover, active and focus-visible states; disabled must look disabled; async actions need a pending state and visible success/error feedback. A main action without hover/pending feedback is a major finding.
 - Imagery and visual richness: a learner- or parent-facing screen that is a plain wall of text or bare form, with no hierarchy, icons or cards, is a minor finding (major when the issue asks for a designed screen). An image URL that looks guessed or unverified, a web image without a license, a photo of an identifiable person, an image without a fixed aspect ratio or missing-file fallback, missing alt text, or an image slot in the code that is not listed in the report is a major finding. Check generation prompts are specific, in English, match the slot's aspect ratio and share one style.
-- UI changes with no screenshots and no stated reason are a major finding; when the coder reported the visual check BLOCKED with a reason, note it as minor so the human checks it manually.
+- Changed screens missing from the screenshots (not declared in "ui_captures") are a major finding: ask the coder to declare them. When the UI capture was BLOCKED, note it as minor so the human checks it manually.
 
 Severity: blocker/major must be fixed before human review; minor/nit are suggestions. Verdict is REQUEST_CHANGES only when at least one blocker or major finding exists, otherwise APPROVE. Write findings in English.
 
@@ -209,7 +209,7 @@ def fix_prompt(review: dict, contract: str) -> str:
     return f"""A code reviewer examined your uncommitted changes and requested changes.
 {findings_text(review)}
 
-Fix every valid blocker and major finding; apply minor ones when cheap and safe. If you disagree with a finding, leave the code and explain why in the report. Rerun the relevant checks, recapture the screenshots of any UI you changed, keep changes uncommitted and follow the same rules as before.
+Fix every valid blocker and major finding; apply minor ones when cheap and safe. If you disagree with a finding, leave the code and explain why in the report. Rerun the relevant narrow checks, keep "ui_captures" up to date for any UI you changed (the automation recaptures it), keep changes uncommitted and follow the same rules as before.
 
 {contract}
 """
