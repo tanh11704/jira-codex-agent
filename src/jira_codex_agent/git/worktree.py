@@ -61,6 +61,34 @@ class WorktreeManager:
             await abort.wait()
             raise GitError(f"Rebase onto {base} failed: {stderr.decode(errors='replace').strip()}")
 
+    async def update_base(self, path: Path) -> str | None:
+        """Bring a resumed worktree onto the latest base while keeping its uncommitted work.
+
+        Used when a dependency has been merged since the task stopped. Returns None on success, else why it was left
+        alone: files changed both here and on the base could conflict, and a conflicted stash would hide the work."""
+        base = await self._fresh_base()
+        local = set((await self._git_in(path, "diff", "--name-only", "HEAD")).split())
+        local |= set((await self._git_in(path, "ls-files", "--others", "--exclude-standard")).split())
+        incoming = set((await self._git_in(path, "diff", "--name-only", "HEAD", base)).split())
+        if overlap := sorted(local & incoming):
+            return f"{len(overlap)} file(s) changed both in the task and on {base}, e.g. {overlap[0]}"
+        if not incoming:
+            return None
+        try:
+            await self._git_in(path, "rebase", "--autostash", base)
+        except GitError as exc:
+            await self._git_in(path, "rebase", "--abort", check=False)
+            return f"rebase onto {base} failed: {exc}"
+        return None
+
+    async def _git_in(self, path: Path, *args: str, check: bool = True) -> str:
+        process = await asyncio.create_subprocess_exec(
+            "git", "-C", str(path), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        if check and process.returncode:
+            raise GitError(stderr.decode(errors="replace").strip() or f"git {args[0]} failed")
+        return stdout.decode(errors="replace")
+
     async def _exclude(self, pattern: str) -> None:
         """Keep a pattern out of git status in every worktree without touching the tracked .gitignore."""
         exclude = Path((await self._git("rev-parse", "--path-format=absolute", "--git-common-dir")).strip()) / "info" / "exclude"

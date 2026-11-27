@@ -47,6 +47,8 @@ struct TaskActionItems: View {
         }
         if ["interrupted", "failed", "needs_human"].contains(task.state) {
             Button("Resume in same worktree") { Task { await store.resumeTask(task) } }
+            Button("Recheck without agent") { Task { await store.recheckTask(task) } }
+                .help("Reruns the local checks and UI capture on the current changes. Passing goes on to review; only a real failure wakes the agent.")
         }
         if task.state == "skipped" {
             Button("Unskip") { Task { await store.taskAction("unskip", task: task) } }

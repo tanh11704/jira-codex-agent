@@ -11,6 +11,11 @@ class JiraUser(BaseModel):
 class JiraStatus(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = "Unknown"
+    category: dict | None = Field(default=None, alias="statusCategory")
+
+    @property
+    def done(self) -> bool:
+        return (self.category or {}).get("key") == "done"
 
 
 class JiraNamed(BaseModel):

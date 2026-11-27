@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import json
+import re
 import signal
 import subprocess
 import time
@@ -61,6 +62,7 @@ class Coder:
 
 # How the daemon's screenshot and layout pass appears in a report's tests.
 CAPTURE_COMMAND = 'UI capture (automation)'
+ISSUE_KEY = re.compile(r'\b[A-Z][A-Z0-9]+-\d+\b')
 
 class Orchestrator:
     def __init__(
@@ -92,6 +94,7 @@ class Orchestrator:
         self.stop_event = asyncio.Event()
         self.wake_event = asyncio.Event()
         self.jira_sync_lock = asyncio.Lock()
+        self._last_unblock_check: float | None = None
         self.current_key: str | None = None
         self.abort_event = asyncio.Event()
         self.idle_event = asyncio.Event()
@@ -166,6 +169,7 @@ class Orchestrator:
 
     async def run_cycle(self) -> bool:
         self._decide_backlog()
+        await self._resume_unblocked()
         pending = self.database.due_recovery()
         if pending:
             if self.settings.dry_run or not await self._respect_quota():
@@ -221,6 +225,9 @@ class Orchestrator:
     async def _process(self, issue: JiraIssue, resume: dict | None) -> None:
         task = self.database.get_task(issue.key) or {}
         session_id = resume.get('session_id') if resume else None
+        recheck = bool(resume and task.get('recheck'))
+        if recheck:
+            self.database.update_task(issue.key, TaskState(task['state']), recheck=0)  # one recheck per request
         if resume and not (resume.get('worktree') and Path(resume['worktree']).is_dir()):
             self.database.append_event(issue.key, 'lifecycle', 'Original worktree missing; starting again in a fresh worktree')
             resume, session_id = None, None
@@ -251,7 +258,7 @@ class Orchestrator:
             backend = json.loads(task['backend_report']) if resume and task.get('backend_report') else None
             finished, result = await self._guarded(issue.key, self._code_frontend(
                 issue, task, worktree, plan, backend, resume=bool(resume),
-                codex_session=session_id, backend_agent=self._agent_for(task, 'backend')))
+                codex_session=session_id, backend_agent=self._agent_for(task, 'backend'), recheck=recheck))
             if not finished:
                 return
             if result is not None:
@@ -279,7 +286,7 @@ class Orchestrator:
 
         async def code() -> CodexRunResult:
             nonlocal coder
-            first = await coder.start(prompt)
+            first = self._recheck_result(issue.key, task, session_id) if recheck else await coder.start(prompt)
             if first is None:
                 self.database.append_event(issue.key, 'lifecycle', f'{coder.name} unavailable; Codex implements it instead')
                 coder = self._codex_coder(issue.key, task, worktree, session_id, roles)
@@ -711,10 +718,85 @@ class Orchestrator:
     def _json(task: dict | None, column: str) -> list:
         return json.loads((task or {}).get(column) or '[]')
 
+    def request_recheck(self, key: str) -> None:
+        """Rerun the local checks and UI capture on a PARTIAL task's worktree without an agent turn.
+
+        For work the agent finished but could not prove, e.g. checks that timed out or were blocked: when they pass,
+        the task goes on to review as COMPLETED; only a real failure wakes the agent, in its own session."""
+        task = self.database.get_task(key)
+        if not task or task['state'] not in ('needs_human', 'failed', 'interrupted'):
+            raise ValueError('Task is not waiting for you')
+        report = parse_report(task.get('report') or '') if task.get('report') else None
+        if not report or report['status'] not in ('PARTIAL', 'COMPLETED'):
+            raise ValueError('Only a PARTIAL or COMPLETED report can be rechecked')
+        if report.get('questions'):
+            raise ValueError('Answer the open questions instead; a recheck cannot decide them')
+        if not task.get('worktree') or not Path(task['worktree']).is_dir():
+            raise ValueError('The worktree is gone; resume or retry the task instead')
+        self.database.update_task(key, TaskState(task['state']), recheck=1)
+        self.database.append_event(key, 'lifecycle', 'Recheck requested: rerunning checks and UI capture without the agent')
+        self.database.request_resume(key)
+        self.wake_event.set()
+
+    def _recheck_result(self, key: str, task: dict, session_id: str | None) -> CodexRunResult:
+        """The agent's last report, offered to verification as COMPLETED; failing checks still downgrade it."""
+        report = parse_report(task.get('report') or '') or {}
+        previous = '; '.join(report.get('blockers') or []) or report.get('status', '')
+        note = ('## Kiểm tra lại bởi automation\n'
+                'Chạy lại check và chụp UI trên worktree hiện có, không gọi agent. Trạng thái trước đó: '
+                f"{report.get('status')}" + (f' — {previous}' if previous else ''))
+        report.update(status='COMPLETED', blockers=[], sandbox_blocked_only=False,
+                      report=(report.get('report') or '').rstrip() + '\n\n' + note)
+        self.database.append_event(key, 'lifecycle', 'Rechecking the existing changes without an agent turn')
+        return CodexRunResult(outcome=RunOutcome.SUCCEEDED, session_id=session_id,
+                              final_message=json.dumps(report, ensure_ascii=False))
+
+    async def _resume_unblocked(self) -> None:
+        """Resume BLOCKED_DEPENDENCY tasks once every issue they named is Done in Jira.
+
+        The worktree is first moved onto the latest base (keeping its uncommitted work) so the merged dependency is
+        there. Each set of dependencies triggers one automatic resume; a task that blocks again waits for a human."""
+        interval = self._setting('jira_poll_seconds', 600)
+        if self._last_unblock_check is not None and time.monotonic() - self._last_unblock_check < interval:
+            return
+        self._last_unblock_check = time.monotonic()
+        for task in self.database.list_tasks(TaskState.NEEDS_HUMAN):
+            key = task['issue_key']
+            report = json.loads(task['report']) if task.get('report') else {}
+            if report.get('status') != 'BLOCKED_DEPENDENCY' or report.get('questions'):
+                continue
+            text = ' '.join(report.get('blockers') or []) + ' ' + (report.get('summary') or '')
+            needed = sorted(set(ISSUE_KEY.findall(text)) - {key})
+            if not needed or self._json(task, 'auto_resumed') == needed:
+                continue
+            try:
+                issue = await self.jira.get_issue(key)
+                flag_field = await self.jira.flag_field() if hasattr(self.jira, 'flag_field') else None
+                if issue.blockers(flag_field):
+                    continue  # Jira links still name an unfinished blocker
+                waiting = [other for other in needed if not getattr((await self.jira.get_issue(other)).fields.status, 'done', False)]
+            except Exception as exc:
+                log.warning('could not check dependencies of %s: %s', key, exc)
+                continue
+            if waiting:
+                continue
+            self.database.update_task(key, TaskState.NEEDS_HUMAN, auto_resumed=needed)
+            if task.get('worktree') and Path(task['worktree']).is_dir():
+                problem = await self.worktrees.update_base(Path(task['worktree']))
+                if problem:
+                    self.database.append_event(key, 'lifecycle', f"{', '.join(needed)} done, but the worktree was not "
+                                               f'updated onto the latest base: {problem}. Update it and resume.')
+                    self.notify(f'{key}: dependency done', 'Worktree needs a manual update before resuming')
+                    continue
+            self.database.append_event(key, 'lifecycle', f"{', '.join(needed)} done in Jira; worktree on the latest "
+                                       'base, resuming automatically')
+            self.database.request_resume(key)
+            self.wake_event.set()
+
     def _resume_preamble(self, task: dict, approvals: bool = True) -> str:
         """Tell the resumed Codex session what changed since it stopped."""
         parts = ['Continue the interrupted task in this existing worktree. Inspect and preserve existing changes, '
-                 'finish remaining work and run tests.']
+                 'finish remaining work and run only narrow checks; the automation reruns the full checks and UI capture.']
         report = json.loads(task['report']) if task.get('report') else None
         if report and report.get('status') != 'COMPLETED':
             blockers = '; '.join(report.get('blockers') or [])
@@ -996,7 +1078,7 @@ class Orchestrator:
 
     async def _code_frontend(self, issue: JiraIssue, task: dict, worktree: Path, plan: str | None,
                              backend: dict | None, *, resume: bool, codex_session: str | None,
-                             backend_agent: str = 'codex') -> CodexRunResult | None:
+                             backend_agent: str = 'codex', recheck: bool = False) -> CodexRunResult | None:
         """The frontend agent implements the UI in the worktree; None when it cannot run now."""
         key = issue.key
         coder = await self._coder('frontend', key, task, worktree, resume=resume, codex_session=codex_session,
@@ -1009,7 +1091,7 @@ class Orchestrator:
         prompt = self._prompt(issue, task, plan, frontend_scope(backend, CODER_NAMES[backend_agent]))
         if resume:
             prompt = self._resume_preamble(task, approvals=coder.agent == 'codex') + prompt
-        result = await coder.start(prompt)
+        result = self._recheck_result(key, task, codex_session) if recheck else await coder.start(prompt)
         if result is None:
             return None
         result = await self._verify(key, worktree, result, coder.fix, coder.name)

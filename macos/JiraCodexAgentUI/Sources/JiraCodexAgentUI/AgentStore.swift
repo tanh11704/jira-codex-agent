@@ -167,6 +167,16 @@ final class AgentStore: ObservableObject {
         }
     }
 
+    func recheckTask(_ task: AgentTask) async {
+        do {
+            _ = try await client.request("recheck:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)
+            taskActionError = nil
+            await refresh()
+        } catch {
+            taskActionError = error.localizedDescription
+        }
+    }
+
     func resumeTask(_ task: AgentTask) async {
         do {
             _ = try await client.request("resume_task:" + task.issueKey, socketPath: expandedSocketPath, as: PauseResponse.self)

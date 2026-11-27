@@ -140,6 +140,11 @@ class ControlServer:
                     raise ValueError('Deciding unavailable')
                 self.orchestrator.request_decide(command.split(':', 1)[1])
                 response = {'accepted': True, 'paused': self.database.is_paused()}
+            elif command.startswith('recheck:'):
+                if not self.orchestrator:
+                    raise ValueError('Agent is not running')
+                self.orchestrator.request_recheck(command.split(':', 1)[1])
+                response = {'accepted': True, 'paused': self.database.is_paused()}
             elif command.startswith('resume_task:'):
                 self.database.request_resume(command.split(':', 1)[1])
                 if self.orchestrator:

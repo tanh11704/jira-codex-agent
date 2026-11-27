@@ -170,6 +170,17 @@ Claude reports COMPLETED:
 - A PARTIAL report whose `blockers` list is empty (only BLOCKED checks remain) is verified here like
   `sandbox_blocked_only`, and upgraded to COMPLETED when the checks pass.
 
+### Recheck and dependency resume
+
+- **Recheck without agent** (task menu, or `recheck:<KEY>` on the control socket): for a PARTIAL task whose code is
+  done but whose checks timed out or were blocked. The daemon reruns the local checks and UI capture on the existing
+  worktree with no agent turn; passing sends it on to review as COMPLETED, and only a real failure wakes the agent in its
+  own session. Tasks with open questions must be answered instead.
+- **Dependency resume:** a `BLOCKED_DEPENDENCY` task whose blockers name other issues (e.g. `TM-103`) is resumed
+  automatically once all of them are Done in Jira and its own Jira links show no unfinished blocker. Its worktree is
+  first rebased onto the fetched base with `--autostash`, keeping uncommitted work; if a file changed both in the task
+  and on the base, nothing is touched and you are notified. Each set of dependencies triggers one automatic resume.
+
 ### UI screenshots by the daemon
 
 Agents do not start dev servers, drive browsers or look at screenshots. For each changed screen and state they add an

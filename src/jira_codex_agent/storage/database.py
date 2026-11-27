@@ -49,6 +49,8 @@ MIGRATED_COLUMNS = {
     # Who did each job: {role: {agent, model, effort, input_tokens, output_tokens, passes}} (JSON)
     "agents": "TEXT",
     "agent_sessions": "TEXT",  # CLI coding sessions to resume, by role: {backend|frontend: id} (JSON)
+    "recheck": "INTEGER NOT NULL DEFAULT 0",  # 1: the next resume only reruns checks and UI capture, no agent turn
+    "auto_resumed": "TEXT",  # issue keys this task was last resumed for automatically once they were done (JSON list)
 }
 MAX_EVENT_CHARS = 8000
 
@@ -173,12 +175,12 @@ class Database:
         allowed = {"worktree", "session_id", "result", "error", "progress", "attempts", "next_attempt_at",
                    "report", "retry_note", "prompt", "blocked_reason", "plan", "review",
                    "claude_usage", "phase", "area", "claude_session_id", "backend_report", "decisions", "declined_approvals",
-                   "allowed_approvals", "agents", "agent_sessions"}
+                   "allowed_approvals", "agents", "agent_sessions", "recheck", "auto_resumed"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"Unsupported fields: {sorted(invalid)}")
         values = {key: json.dumps(value) if key in ("result", "report", "review", "claude_usage", "decisions", "declined_approvals",
-                                     "allowed_approvals", "backend_report", "agents", "agent_sessions")
+                                     "allowed_approvals", "backend_report", "agents", "agent_sessions", "auto_resumed")
                   and value is not None else value
                   for key, value in fields.items()}
         values.update(state=state.value, updated_at=_now())
