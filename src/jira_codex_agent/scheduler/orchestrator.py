@@ -34,7 +34,7 @@ from jira_codex_agent.jira.models import JiraIssue, adf_to_text
 from jira_codex_agent.macos import SleepGuard
 from jira_codex_agent.storage.database import Database, TaskState
 from jira_codex_agent.verify.checks import (CheckResult, check_fix_prompt, checks_section, failure_feedback,
-                                            failure_signature, run_check, timed_out)
+                                            failure_signature, killed_by_timeout, run_check, timed_out)
 from jira_codex_agent.verify.images import changed_image_references, is_declared
 from jira_codex_agent.verify.ui_capture import CaptureResult, capture as capture_ui, capture_section
 
@@ -609,11 +609,14 @@ class Orchestrator:
             self.database.append_event(key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} ({item.seconds}s)"
                                        + ('' if item.ok else '\n' + item.output))
             for attempt in range(retries):
-                if item.ok or not timed_out(item):
+                killed = killed_by_timeout(item)
+                if item.ok or not (timed_out(item) or killed):
                     break
+                # A suite killed at the limit usually ran on a loaded machine; give the rerun twice the time.
+                rerun_timeout = timeout * 2 if killed else timeout
                 self.database.append_event(key, 'lifecycle', f'{command} failed with a timeout; rerunning '
-                                           f'({attempt + 1}/{retries})')
-                item = await run_check(command, worktree, timeout)
+                                           f'({attempt + 1}/{retries}, limit {rerun_timeout}s)')
+                item = await run_check(command, worktree, rerun_timeout)
                 self.database.append_event(key, 'check', f"{item.command} → {'PASS' if item.ok else 'FAIL'} "
                                            f"({item.seconds}s, rerun)" + ('' if item.ok else '\n' + item.output))
                 if item.ok:

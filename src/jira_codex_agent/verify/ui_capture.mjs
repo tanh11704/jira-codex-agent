@@ -106,9 +106,14 @@ for (const capture of spec.captures) {
           el.getAttribute('placeholder') || '').trim().replace(/\s+/g, ' ').slice(0, 40);
         return `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${text ? ` "${text}"` : ''}`;
       };
+      const visible = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+        return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0; };
+      // Behind an open modal the page is covered on purpose; only the modal's own controls can overlap each other.
+      const modals = [...document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]')]
+        .filter(visible);
       const controls = [...document.querySelectorAll('input:not([type=hidden]), select, textarea, button')]
-        .filter((el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect();
-          return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0; });
+        .filter(visible)
+        .filter((el) => !modals.length || modals.some((modal) => modal.contains(el)));
       for (let i = 0; i < controls.length; i++) {
         for (let j = i + 1; j < controls.length; j++) {
           const [a, b] = [controls[i], controls[j]];

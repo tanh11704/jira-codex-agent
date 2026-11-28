@@ -16,6 +16,7 @@ ERROR_LINE = re.compile(r'error|fail|exception|traceback|cannot|unable|not found
                         re.IGNORECASE)
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 MAX_SIGNATURE_LINES = 2000
+MAX_KEPT_BYTES = 4_000_000
 
 
 class CheckResult(BaseModel):
@@ -38,6 +39,11 @@ def timed_out(result: CheckResult) -> bool:
     if result.ok or result.exit_code is None:
         return False
     return any(TIMEOUT_LINE.search(line) for line in [*result.signature, result.output])
+
+
+def killed_by_timeout(result: CheckResult) -> bool:
+    """Whether the automation itself killed the check for running past verify_timeout_seconds."""
+    return not result.ok and result.exit_code is None and result.output.startswith('Timed out after')
 
 
 def failure_signature(text: str, root: Path | str | None = None) -> list[str]:
@@ -84,8 +90,18 @@ async def run_check(command: str, cwd: Path, timeout: int) -> CheckResult:
         shell, '-lc', command, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         start_new_session=True, env={**os.environ, 'CI': '1', 'FORCE_COLOR': '0', 'NO_COLOR': '1'})
+    chunks: list[bytes] = []
+
+    async def drain() -> None:
+        # Read as it arrives so a check killed for running too long still leaves its log behind.
+        while chunk := await process.stdout.read(65536):
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > MAX_KEPT_BYTES * 2:
+                chunks[:] = [b''.join(chunks)[-MAX_KEPT_BYTES:]]
+
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), timeout)
+        await asyncio.wait_for(drain(), timeout)
+        await process.wait()
     except (TimeoutError, asyncio.CancelledError) as exc:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -94,8 +110,11 @@ async def run_check(command: str, cwd: Path, timeout: int) -> CheckResult:
         await process.wait()
         if isinstance(exc, asyncio.CancelledError):
             raise
+        partial = b''.join(chunks).decode(errors='replace')
         return CheckResult(command=command, ok=False, seconds=time.monotonic() - started,
-                           output=f'Timed out after {timeout}s')
+                           output=f'Timed out after {timeout}s (killed by the automation). Last output before the kill:\n'
+                                  + trim_output(partial), signature=failure_signature(partial, cwd))
+    output = b''.join(chunks)
     ok = process.returncode == 0
     text = '' if ok else output.decode(errors='replace')
     return CheckResult(command=command, ok=ok, exit_code=process.returncode, seconds=round(time.monotonic() - started, 1),
